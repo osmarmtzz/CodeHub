@@ -10,7 +10,8 @@ $configFile = __DIR__ . '/.codehub_config.json';
 $customConfig = file_exists($configFile) ? json_decode(file_get_contents($configFile), true) : [];
 
 // Función para detectar tipo de proyecto
-function detectarTipoProyecto($carpeta) {
+function detectarTipoProyecto($carpeta)
+{
     $tipos = [
         'composer.json' => ['tipo' => 'PHP', 'icono' => 'fa-php', 'color' => '#777bb3'],
         'package.json' => ['tipo' => 'Node.js', 'icono' => 'fa-node-js', 'color' => '#68a063'],
@@ -20,28 +21,30 @@ function detectarTipoProyecto($carpeta) {
         'requirements.txt' => ['tipo' => 'Python', 'icono' => 'fa-python', 'color' => '#3776ab'],
         '.git' => ['tipo' => 'Git', 'icono' => 'fa-git-alt', 'color' => '#f05032'],
     ];
-    
+
     foreach ($tipos as $archivo => $info) {
         if (file_exists($carpeta . '/' . $archivo)) {
             return $info;
         }
     }
-    
+
     return ['tipo' => 'Proyecto', 'icono' => 'fa-folder', 'color' => '#3b82f6'];
 }
 
 // Contar archivos en carpeta
-function contarArchivos($carpeta) {
+function contarArchivos($carpeta)
+{
     $archivos = glob($carpeta . '/*');
     return count($archivos);
 }
 
 // Obtener última modificación
-function ultimaModificacion($carpeta) {
+function ultimaModificacion($carpeta)
+{
     $tiempo = filemtime($carpeta);
     $ahora = time();
     $diff = $ahora - $tiempo;
-    
+
     if ($diff < 3600) return floor($diff / 60) . ' min';
     if ($diff < 86400) return floor($diff / 3600) . ' hrs';
     if ($diff < 604800) return floor($diff / 86400) . ' días';
@@ -51,12 +54,12 @@ function ultimaModificacion($carpeta) {
 // Acciones AJAX
 if (isset($_GET['accion'])) {
     header('Content-Type: application/json');
-    
+
     // Crear carpeta
     if ($_GET['accion'] === 'crear_carpeta' && isset($_POST['nombre'])) {
         $nombre = preg_replace('/[^a-zA-Z0-9_-]/', '', $_POST['nombre']);
         $rutaCarpeta = $rutaBase . $nombre;
-        
+
         if (!file_exists($rutaCarpeta)) {
             mkdir($rutaCarpeta, 0755, true);
             echo json_encode(['success' => true, 'mensaje' => 'Carpeta creada correctamente']);
@@ -65,12 +68,12 @@ if (isset($_GET['accion'])) {
         }
         exit;
     }
-    
+
     // Crear archivo
     if ($_GET['accion'] === 'crear_archivo' && isset($_POST['nombre']) && isset($_POST['carpeta'])) {
         $carpeta = realpath($rutaBase . $_POST['carpeta']);
         $nombre = basename($_POST['nombre']);
-        
+
         if ($carpeta && is_dir($carpeta)) {
             $rutaArchivo = $carpeta . '/' . $nombre;
             file_put_contents($rutaArchivo, '');
@@ -80,12 +83,12 @@ if (isset($_GET['accion'])) {
         }
         exit;
     }
-    
+
     // Guardar configuración personalizada
     if ($_GET['accion'] === 'guardar_config' && isset($_POST['carpeta'])) {
         $configFile = __DIR__ . '/.codehub_config.json';
         $config = file_exists($configFile) ? json_decode(file_get_contents($configFile), true) : [];
-        
+
         $carpeta = $_POST['carpeta'];
         $config[$carpeta] = [
             'icono' => $_POST['icono'] ?? null,
@@ -93,28 +96,28 @@ if (isset($_GET['accion'])) {
             'imagen' => $_POST['imagen'] ?? null,
             'descripcion' => $_POST['descripcion'] ?? null
         ];
-        
+
         file_put_contents($configFile, json_encode($config, JSON_PRETTY_PRINT));
         echo json_encode(['success' => true, 'mensaje' => 'Configuración guardada']);
         exit;
     }
-    
+
     // Subir imagen
     if ($_GET['accion'] === 'subir_imagen' && isset($_FILES['imagen']) && isset($_POST['carpeta'])) {
         $carpeta = $_POST['carpeta'];
         $dirImagenes = __DIR__ . '/.codehub_images';
-        
+
         if (!file_exists($dirImagenes)) {
             mkdir($dirImagenes, 0755, true);
         }
-        
+
         $extension = pathinfo($_FILES['imagen']['name'], PATHINFO_EXTENSION);
         $nombreArchivo = md5($carpeta . time()) . '.' . $extension;
         $rutaDestino = $dirImagenes . '/' . $nombreArchivo;
-        
+
         if (move_uploaded_file($_FILES['imagen']['tmp_name'], $rutaDestino)) {
             echo json_encode([
-                'success' => true, 
+                'success' => true,
                 'imagen' => '.codehub_images/' . $nombreArchivo,
                 'mensaje' => 'Imagen subida correctamente'
             ]);
@@ -123,7 +126,7 @@ if (isset($_GET['accion'])) {
         }
         exit;
     }
-    
+
     if ($_GET['accion'] === 'info' && isset($_GET['carpeta'])) {
         $carpeta = realpath($rutaBase . $_GET['carpeta']);
         if ($carpeta && is_dir($carpeta)) {
@@ -138,7 +141,7 @@ if (isset($_GET['accion'])) {
         }
         exit;
     }
-    
+
     if (isset($_GET['carpeta'])) {
         $carpetaAbrir = realpath($rutaBase . $_GET['carpeta']);
         if ($carpetaAbrir && is_dir($carpetaAbrir)) {
@@ -168,13 +171,14 @@ if (isset($_GET['accion'])) {
 // Búsqueda
 $busqueda = isset($_GET['buscar']) ? strtolower($_GET['buscar']) : '';
 if ($busqueda) {
-    $carpetas = array_filter($carpetas, function($carpeta) use ($busqueda) {
+    $carpetas = array_filter($carpetas, function ($carpeta) use ($busqueda) {
         return strpos(strtolower($carpeta), $busqueda) !== false;
     });
 }
 ?>
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -188,7 +192,8 @@ if ($busqueda) {
             box-sizing: border-box;
         }
 
-        html, body {
+        html,
+        body {
             height: 100%;
             font-family: 'Inter', 'Segoe UI', sans-serif;
             color: white;
@@ -243,8 +248,17 @@ if ($busqueda) {
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 0.1; transform: translate(-50%, -50%) scale(1); }
-            50% { opacity: 0.2; transform: translate(-50%, -50%) scale(1.1); }
+
+            0%,
+            100% {
+                opacity: 0.1;
+                transform: translate(-50%, -50%) scale(1);
+            }
+
+            50% {
+                opacity: 0.2;
+                transform: translate(-50%, -50%) scale(1.1);
+            }
         }
 
         .container {
@@ -279,8 +293,15 @@ if ($busqueda) {
         }
 
         @keyframes float {
-            0%, 100% { transform: translateY(0px); }
-            50% { transform: translateY(-10px); }
+
+            0%,
+            100% {
+                transform: translateY(0px);
+            }
+
+            50% {
+                transform: translateY(-10px);
+            }
         }
 
         h1 {
@@ -506,11 +527,12 @@ if ($busqueda) {
 
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-            gap: 10px;
+            grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+            gap: 30px;
             animation: fadeInUp 0.8s ease;
         }
-        
+
+
 
         .grid.list-view {
             grid-template-columns: 1fr;
@@ -526,7 +548,7 @@ if ($busqueda) {
             position: relative;
             overflow: hidden;
             backdrop-filter: blur(10px);
-            min-height: 280px;
+            min-height: 200px;
         }
 
         .card::before {
@@ -545,11 +567,9 @@ if ($busqueda) {
             content: '';
             position: absolute;
             inset: 0;
-            background: radial-gradient(
-                circle at var(--mouse-x, 50%) var(--mouse-y, 50%), 
-                var(--card-glow, rgba(59, 130, 246, 0.15)), 
-                transparent 60%
-            );
+            background: radial-gradient(circle at var(--mouse-x, 50%) var(--mouse-y, 50%),
+                    var(--card-glow, rgba(59, 130, 246, 0.15)),
+                    transparent 60%);
             opacity: 0;
             transition: opacity 0.4s ease;
             pointer-events: none;
@@ -559,8 +579,8 @@ if ($busqueda) {
             transform: translateY(-18px) scale(1.03);
             border-color: var(--card-border, rgba(59, 130, 246, 0.6));
             background: rgba(255, 255, 255, 0.09);
-            box-shadow: 
-                0 32px 95px var(--card-shadow, rgba(59, 130, 246, 0.38)), 
+            box-shadow:
+                0 32px 95px var(--card-shadow, rgba(59, 130, 246, 0.38)),
                 0 18px 45px rgba(0, 0, 0, 0.45),
                 inset 0 1px 0 rgba(255, 255, 255, 0.12);
         }
@@ -597,9 +617,17 @@ if ($busqueda) {
         }
 
         @keyframes dropBounce {
-            0% { transform: scale(1.1); }
-            50% { transform: scale(0.95); }
-            100% { transform: scale(1); }
+            0% {
+                transform: scale(1.1);
+            }
+
+            50% {
+                transform: scale(0.95);
+            }
+
+            100% {
+                transform: scale(1);
+            }
         }
 
         .drag-handle {
@@ -994,6 +1022,7 @@ if ($busqueda) {
                 opacity: 0;
                 transform: translateY(-30px);
             }
+
             to {
                 opacity: 1;
                 transform: translateY(0);
@@ -1166,6 +1195,7 @@ if ($busqueda) {
                 transform: translateX(400px);
                 opacity: 0;
             }
+
             to {
                 transform: translateX(0);
                 opacity: 1;
@@ -1177,6 +1207,7 @@ if ($busqueda) {
                 opacity: 0;
                 transform: translateY(-30px);
             }
+
             to {
                 opacity: 1;
                 transform: translateY(0);
@@ -1188,6 +1219,7 @@ if ($busqueda) {
                 opacity: 0;
                 transform: translateY(30px);
             }
+
             to {
                 opacity: 1;
                 transform: translateY(0);
@@ -1195,23 +1227,28 @@ if ($busqueda) {
         }
 
         @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
+            from {
+                transform: rotate(0deg);
+            }
+
+            to {
+                transform: rotate(360deg);
+            }
         }
 
         @media (max-width: 768px) {
             h1 {
                 font-size: 2.5em;
             }
-            
+
             .grid {
                 grid-template-columns: 1fr;
             }
-            
+
             .controls {
                 flex-direction: column;
             }
-            
+
             .search-box {
                 width: 100%;
             }
@@ -1268,6 +1305,7 @@ if ($busqueda) {
         /* Eliminado - ahora está en card-actions */
     </style>
 </head>
+
 <body>
     <div class="light-accent light-1"></div>
     <div class="light-accent light-2"></div>
@@ -1295,15 +1333,15 @@ if ($busqueda) {
                     <input type="text" id="searchInput" placeholder="Search projects..." autocomplete="off">
                     <i class="fas fa-search"></i>
                 </div>
-           
+
                 <div class="action-buttons">
                     <button class="btn-action btn-create" id="createFolderBtn">
                         <i class="fas fa-folder-plus"></i>
                         New Folder
                     </button>
-                     
+
                     <div class="filter-dropdown" hidden>
-                        <button class="dropdown-toggle" id="sortToggle" >
+                        <button class="dropdown-toggle" id="sortToggle">
                             <i class="fas fa-sort"></i>
                             <i class="fas fa-chevron-down" style="font-size: 0.8em; margin-left: 4px;"></i>
                         </button>
@@ -1339,7 +1377,7 @@ if ($busqueda) {
                     </div>
                 </div>
             </div>
-            
+
             <div class="stats">
                 <span><i class="fas fa-folder"></i> <span id="projectCount"><?= count($carpetas) ?></span> projects</span>
             </div>
@@ -1348,31 +1386,31 @@ if ($busqueda) {
         <div class="grid" id="projectGrid">
             <?php foreach ($carpetas as $carpeta): ?>
                 <?php if (is_dir($carpeta)): ?>
-                    <?php 
-                        $info = detectarTipoProyecto($carpeta);
-                        $numArchivos = contarArchivos($carpeta);
-                        $ultimaMod = ultimaModificacion($carpeta);
-                        
-                        // Cargar configuración personalizada
-                        $customInfo = $customConfig[$carpeta] ?? [];
-                        $icono = $customInfo['icono'] ?? $info['icono'];
-                        $color = $customInfo['color'] ?? $info['color'];
-                        $imagen = $customInfo['imagen'] ?? null;
-                        $descripcion = $customInfo['descripcion'] ?? null;
-                        
-                        // Calcular colores derivados para efectos
-                        $colorRGB = sscanf($color, "#%02x%02x%02x");
-                        $glowColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.15)";
-                        $borderColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.6)";
-                        $shadowColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.35)";
-                        $badgeBg = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.15)";
-                        $badgeBorder = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.3)";
+                    <?php
+                    $info = detectarTipoProyecto($carpeta);
+                    $numArchivos = contarArchivos($carpeta);
+                    $ultimaMod = ultimaModificacion($carpeta);
+
+                    // Cargar configuración personalizada
+                    $customInfo = $customConfig[$carpeta] ?? [];
+                    $icono = $customInfo['icono'] ?? $info['icono'];
+                    $color = $customInfo['color'] ?? $info['color'];
+                    $imagen = $customInfo['imagen'] ?? null;
+                    $descripcion = $customInfo['descripcion'] ?? null;
+
+                    // Calcular colores derivados para efectos
+                    $colorRGB = sscanf($color, "#%02x%02x%02x");
+                    $glowColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.15)";
+                    $borderColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.6)";
+                    $shadowColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.35)";
+                    $badgeBg = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.15)";
+                    $badgeBorder = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.3)";
                     ?>
-                    <div class="card" draggable="true" 
-                         data-carpeta="<?= htmlspecialchars($carpeta) ?>" 
-                         data-tipo="<?= strtolower($info['tipo']) ?>" 
-                         data-fecha="<?= filemtime($carpeta) ?>"
-                         style="--card-color: <?= $color ?>; 
+                    <div class="card" draggable="true"
+                        data-carpeta="<?= htmlspecialchars($carpeta) ?>"
+                        data-tipo="<?= strtolower($info['tipo']) ?>"
+                        data-fecha="<?= filemtime($carpeta) ?>"
+                        style="--card-color: <?= $color ?>; 
                                 --card-gradient: linear-gradient(90deg, <?= $color ?>, <?= $color ?>dd);
                                 --card-glow: <?= $glowColor ?>;
                                 --card-border: <?= $borderColor ?>;
@@ -1385,7 +1423,7 @@ if ($busqueda) {
                                 --badge-color: <?= $color ?>;
                                 --card-drag-bg: rgba(<?= $colorRGB[0] ?>, <?= $colorRGB[1] ?>, <?= $colorRGB[2] ?>, 0.25);">
                         <div class="drag-handle" title="Drag to reorder"><i class="fas fa-grip-vertical"></i></div>
-                        
+
                         <div class="card-actions">
                             <div class="card-action-btn customize" onclick="abrirModalPersonalizar('<?= htmlspecialchars($carpeta) ?>', event)" title="Customize">
                                 <i class="fas fa-paint-brush"></i>
@@ -1396,8 +1434,8 @@ if ($busqueda) {
                         </div>
 
                         <div class="card-header" onclick="window.location.href='<?= htmlspecialchars($carpeta) ?>'">
-                            <div class="card-icon-wrapper" 
-                                 style="<?= $imagen ? 'background-image: url(' . htmlspecialchars($imagen) . ');' : 'background: linear-gradient(135deg, ' . $color . '22, ' . $color . '44);' ?>">
+                            <div class="card-icon-wrapper"
+                                style="<?= $imagen ? 'background-image: url(' . htmlspecialchars($imagen) . ');' : 'background: linear-gradient(135deg, ' . $color . '22, ' . $color . '44);' ?>">
                                 <?php if (!$imagen): ?>
                                     <i class="fas <?= $icono ?>" style="color: <?= $color ?>"></i>
                                 <?php endif; ?>
@@ -1483,7 +1521,7 @@ if ($busqueda) {
             </div>
             <form id="formPersonalizar">
                 <input type="hidden" id="carpetaPersonalizar">
-                
+
                 <div class="form-group">
                     <label>Description</label>
                     <textarea id="descripcionPersonalizar" placeholder="Describe your project..."></textarea>
@@ -1562,7 +1600,7 @@ if ($busqueda) {
 
         // Colores e iconos disponibles
         const colores = [
-            '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', 
+            '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b',
             '#10b981', '#06b6d4', '#ef4444', '#6366f1',
             '#14b8a6', '#f97316', '#a855f7', '#22c55e'
         ];
@@ -1571,7 +1609,7 @@ if ($busqueda) {
             'fa-code', 'fa-laptop-code', 'fa-terminal', 'fa-database',
             'fa-server', 'fa-mobile-alt', 'fa-globe', 'fa-rocket',
             'fa-cog', 'fa-palette', 'fa-chart-line', 'fa-shopping-cart',
-           
+
         ];
 
         let selectedColor = colores[0];
@@ -1581,26 +1619,26 @@ if ($busqueda) {
         // Inicializar orden de cards
         function initCardOrder() {
             const cards = Array.from(document.querySelectorAll('.card'));
-            
+
             if (cardOrder.length === 0) {
                 cardOrder = cards.map(card => card.getAttribute('data-carpeta'));
                 localStorage.setItem('codehub_card_order', JSON.stringify(cardOrder));
             } else {
                 const grid = document.getElementById('projectGrid');
                 const orderedCards = [];
-                
+
                 cardOrder.forEach(carpeta => {
                     const card = cards.find(c => c.getAttribute('data-carpeta') === carpeta);
                     if (card) orderedCards.push(card);
                 });
-                
+
                 cards.forEach(card => {
                     if (!orderedCards.includes(card)) {
                         orderedCards.push(card);
                         cardOrder.push(card.getAttribute('data-carpeta'));
                     }
                 });
-                
+
                 orderedCards.forEach(card => grid.appendChild(card));
                 localStorage.setItem('codehub_card_order', JSON.stringify(cardOrder));
             }
@@ -1609,7 +1647,7 @@ if ($busqueda) {
         // Sistema de Drag & Drop
         function initDragAndDrop() {
             const cards = document.querySelectorAll('.card');
-            
+
             cards.forEach(card => {
                 card.addEventListener('dragstart', handleDragStart);
                 card.addEventListener('dragend', handleDragEnd);
@@ -1656,28 +1694,28 @@ if ($busqueda) {
             if (e.stopPropagation) {
                 e.stopPropagation();
             }
-            
+
             if (draggedCard !== this) {
                 const draggedCarpeta = draggedCard.getAttribute('data-carpeta');
                 const targetCarpeta = this.getAttribute('data-carpeta');
-                
+
                 const draggedIndex = cardOrder.indexOf(draggedCarpeta);
                 const targetIndex = cardOrder.indexOf(targetCarpeta);
-                
+
                 cardOrder.splice(draggedIndex, 1);
                 cardOrder.splice(targetIndex, 0, draggedCarpeta);
-                
+
                 localStorage.setItem('codehub_card_order', JSON.stringify(cardOrder));
-                
+
                 const grid = document.getElementById('projectGrid');
                 const allCards = Array.from(grid.querySelectorAll('.card'));
-                
+
                 allCards.sort((a, b) => {
                     const aIndex = cardOrder.indexOf(a.getAttribute('data-carpeta'));
                     const bIndex = cardOrder.indexOf(b.getAttribute('data-carpeta'));
                     return aIndex - bIndex;
                 });
-                
+
                 this.classList.add('dropping');
                 setTimeout(() => {
                     this.classList.remove('dropping');
@@ -1685,7 +1723,7 @@ if ($busqueda) {
                     mostrarNotificacion('Order saved successfully');
                 }, 100);
             }
-            
+
             return false;
         }
 
@@ -1768,18 +1806,18 @@ if ($busqueda) {
         document.getElementById('formCrearCarpeta').addEventListener('submit', async (e) => {
             e.preventDefault();
             const nombre = document.getElementById('nombreCarpeta').value;
-            
+
             const formData = new FormData();
             formData.append('nombre', nombre);
-            
+
             const response = await fetch('?accion=crear_carpeta', {
                 method: 'POST',
                 body: formData
             });
-            
+
             const result = await response.json();
             mostrarNotificacion(result.mensaje);
-            
+
             if (result.success) {
                 cerrarModal('modalCrearCarpeta');
                 setTimeout(() => location.reload(), 1000);
@@ -1791,19 +1829,19 @@ if ($busqueda) {
             e.preventDefault();
             const nombre = document.getElementById('nombreArchivo').value;
             const carpeta = document.getElementById('carpetaArchivo').value;
-            
+
             const formData = new FormData();
             formData.append('nombre', nombre);
             formData.append('carpeta', carpeta);
-            
+
             const response = await fetch('?accion=crear_archivo', {
                 method: 'POST',
                 body: formData
             });
-            
+
             const result = await response.json();
             mostrarNotificacion(result.mensaje);
-            
+
             if (result.success) {
                 cerrarModal('modalCrearArchivo');
             }
@@ -1814,26 +1852,26 @@ if ($busqueda) {
             e.preventDefault();
             const carpeta = document.getElementById('carpetaPersonalizar').value;
             const descripcion = document.getElementById('descripcionPersonalizar').value;
-            
+
             let imagenUrl = null;
-            
+
             // Si hay imagen, subirla primero
             if (uploadedImage) {
                 const formData = new FormData();
                 formData.append('imagen', uploadedImage);
                 formData.append('carpeta', carpeta);
-                
+
                 const uploadResponse = await fetch('?accion=subir_imagen', {
                     method: 'POST',
                     body: formData
                 });
-                
+
                 const uploadResult = await uploadResponse.json();
                 if (uploadResult.success) {
                     imagenUrl = uploadResult.imagen;
                 }
             }
-            
+
             // Guardar configuración
             const configData = new FormData();
             configData.append('carpeta', carpeta);
@@ -1843,15 +1881,15 @@ if ($busqueda) {
             if (imagenUrl) {
                 configData.append('imagen', imagenUrl);
             }
-            
+
             const response = await fetch('?accion=guardar_config', {
                 method: 'POST',
                 body: configData
             });
-            
+
             const result = await response.json();
             mostrarNotificacion(result.mensaje);
-            
+
             if (result.success) {
                 cerrarModal('modalPersonalizar');
                 setTimeout(() => location.reload(), 1000);
@@ -1877,7 +1915,7 @@ if ($busqueda) {
                 e.stopPropagation();
                 const carpeta = btn.getAttribute('data-carpeta');
                 const icon = btn.querySelector('i');
-                
+
                 if (favorites.includes(carpeta)) {
                     favorites = favorites.filter(f => f !== carpeta);
                     btn.classList.remove('active');
@@ -1891,7 +1929,7 @@ if ($busqueda) {
                     icon.classList.add('fas');
                     mostrarNotificacion('Added to favorites');
                 }
-                
+
                 localStorage.setItem('codehub_favorites', JSON.stringify(favorites));
             });
         });
@@ -1949,14 +1987,14 @@ if ($busqueda) {
         function sortCards() {
             const grid = document.getElementById('projectGrid');
             const cards = Array.from(grid.querySelectorAll('.card'));
-            
+
             cards.sort((a, b) => {
                 const nameA = a.getAttribute('data-carpeta').toLowerCase();
                 const nameB = b.getAttribute('data-carpeta').toLowerCase();
                 const dateA = parseInt(a.getAttribute('data-fecha'));
                 const dateB = parseInt(b.getAttribute('data-fecha'));
-                
-                switch(currentSort) {
+
+                switch (currentSort) {
                     case 'name-asc':
                         return nameA.localeCompare(nameB);
                     case 'name-desc':
@@ -1969,9 +2007,9 @@ if ($busqueda) {
                         return 0;
                 }
             });
-            
+
             cards.forEach(card => grid.appendChild(card));
-            
+
             cardOrder = cards.map(card => card.getAttribute('data-carpeta'));
             localStorage.setItem('codehub_card_order', JSON.stringify(cardOrder));
         }
@@ -2062,7 +2100,7 @@ if ($busqueda) {
             const btn = document.getElementById('refreshBtn');
             const icon = btn.querySelector('i');
             icon.style.animation = 'spin 0.5s linear';
-            
+
             setTimeout(() => {
                 icon.style.animation = '';
                 mostrarNotificacion('Proyectos actualizados');
@@ -2127,4 +2165,5 @@ if ($busqueda) {
         initDragAndDrop();
     </script>
 </body>
+
 </html>
