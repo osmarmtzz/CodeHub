@@ -5,6 +5,10 @@ $mostrarVolver = rtrim(realpath(__DIR__), DIRECTORY_SEPARATOR) !== rtrim(realpat
 // Ruta base real
 $rutaBase = str_replace('\\', '/', realpath(__DIR__)) . '/';
 
+// Cargar configuraciones personalizadas
+$configFile = __DIR__ . '/.codehub_config.json';
+$customConfig = file_exists($configFile) ? json_decode(file_get_contents($configFile), true) : [];
+
 // Función para detectar tipo de proyecto
 function detectarTipoProyecto($carpeta) {
     $tipos = [
@@ -47,6 +51,78 @@ function ultimaModificacion($carpeta) {
 // Acciones AJAX
 if (isset($_GET['accion'])) {
     header('Content-Type: application/json');
+    
+    // Crear carpeta
+    if ($_GET['accion'] === 'crear_carpeta' && isset($_POST['nombre'])) {
+        $nombre = preg_replace('/[^a-zA-Z0-9_-]/', '', $_POST['nombre']);
+        $rutaCarpeta = $rutaBase . $nombre;
+        
+        if (!file_exists($rutaCarpeta)) {
+            mkdir($rutaCarpeta, 0755, true);
+            echo json_encode(['success' => true, 'mensaje' => 'Carpeta creada correctamente']);
+        } else {
+            echo json_encode(['success' => false, 'mensaje' => 'La carpeta ya existe']);
+        }
+        exit;
+    }
+    
+    // Crear archivo
+    if ($_GET['accion'] === 'crear_archivo' && isset($_POST['nombre']) && isset($_POST['carpeta'])) {
+        $carpeta = realpath($rutaBase . $_POST['carpeta']);
+        $nombre = basename($_POST['nombre']);
+        
+        if ($carpeta && is_dir($carpeta)) {
+            $rutaArchivo = $carpeta . '/' . $nombre;
+            file_put_contents($rutaArchivo, '');
+            echo json_encode(['success' => true, 'mensaje' => 'Archivo creado correctamente']);
+        } else {
+            echo json_encode(['success' => false, 'mensaje' => 'Carpeta no válida']);
+        }
+        exit;
+    }
+    
+    // Guardar configuración personalizada
+    if ($_GET['accion'] === 'guardar_config' && isset($_POST['carpeta'])) {
+        $configFile = __DIR__ . '/.codehub_config.json';
+        $config = file_exists($configFile) ? json_decode(file_get_contents($configFile), true) : [];
+        
+        $carpeta = $_POST['carpeta'];
+        $config[$carpeta] = [
+            'icono' => $_POST['icono'] ?? null,
+            'color' => $_POST['color'] ?? null,
+            'imagen' => $_POST['imagen'] ?? null,
+            'descripcion' => $_POST['descripcion'] ?? null
+        ];
+        
+        file_put_contents($configFile, json_encode($config, JSON_PRETTY_PRINT));
+        echo json_encode(['success' => true, 'mensaje' => 'Configuración guardada']);
+        exit;
+    }
+    
+    // Subir imagen
+    if ($_GET['accion'] === 'subir_imagen' && isset($_FILES['imagen']) && isset($_POST['carpeta'])) {
+        $carpeta = $_POST['carpeta'];
+        $dirImagenes = __DIR__ . '/.codehub_images';
+        
+        if (!file_exists($dirImagenes)) {
+            mkdir($dirImagenes, 0755, true);
+        }
+        
+        $extension = pathinfo($_FILES['imagen']['name'], PATHINFO_EXTENSION);
+        $nombreArchivo = md5($carpeta . time()) . '.' . $extension;
+        $rutaDestino = $dirImagenes . '/' . $nombreArchivo;
+        
+        if (move_uploaded_file($_FILES['imagen']['tmp_name'], $rutaDestino)) {
+            echo json_encode([
+                'success' => true, 
+                'imagen' => '.codehub_images/' . $nombreArchivo,
+                'mensaje' => 'Imagen subida correctamente'
+            ]);
+        } else {
+            echo json_encode(['success' => false, 'mensaje' => 'Error al subir imagen']);
+        }
+        exit;
+    }
     
     if ($_GET['accion'] === 'info' && isset($_GET['carpeta'])) {
         $carpeta = realpath($rutaBase . $_GET['carpeta']);
@@ -102,7 +178,7 @@ if ($busqueda) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CodeHub - Panel de Proyectos</title>
+    <title>CodeHub - Project Dashboard</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="shortcut icon" href="icono.png" type="image/x-icon">
     <style>
@@ -332,6 +408,18 @@ if ($busqueda) {
             color: white;
         }
 
+        .btn-action.btn-create {
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            border: none;
+            color: white;
+            font-weight: 600;
+        }
+
+        .btn-action.btn-create:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(59, 130, 246, 0.3);
+        }
+
         .btn-action i {
             font-size: 1em;
         }
@@ -341,7 +429,7 @@ if ($busqueda) {
         }
 
         .dropdown-toggle {
-            padding: 20px 16px;
+            padding: 10px 16px;
             border: 1px solid rgba(255, 255, 255, 0.06);
             background: rgba(255, 255, 255, 0.03);
             border-radius: 10px;
@@ -399,25 +487,7 @@ if ($busqueda) {
             color: #3b82f6;
         }
 
-        .favorite-star {
-            position: absolute;
-            top: 16px;
-            right: 16px;
-            font-size: 1.2em;
-            color: #6b7280;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            z-index: 10;
-        }
-
-        .favorite-star:hover {
-            color: #fbbf24;
-            transform: scale(1.2);
-        }
-
-        .favorite-star.active {
-            color: #fbbf24;
-        }
+        /* Eliminado - ahora está en card-actions */
 
         .stats {
             display: flex;
@@ -436,24 +506,27 @@ if ($busqueda) {
 
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 10px;
             animation: fadeInUp 0.8s ease;
         }
+        
 
         .grid.list-view {
             grid-template-columns: 1fr;
         }
 
         .card {
-            background: rgba(255, 255, 255, 0.03);
-            border-radius: 16px;
-            padding: 24px;
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-            cursor: grab;
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 24px;
+            padding: 0;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+            cursor: pointer;
             position: relative;
             overflow: hidden;
+            backdrop-filter: blur(10px);
+            min-height: 280px;
         }
 
         .card::before {
@@ -462,24 +535,49 @@ if ($busqueda) {
             top: 0;
             left: 0;
             right: 0;
-            height: 3px;
-            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
-            transform: scaleX(0);
-            transition: transform 0.3s ease;
+            height: 5px;
+            background: var(--card-gradient);
+            opacity: 0;
+            transition: opacity 0.4s ease;
+        }
+
+        .card::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(
+                circle at var(--mouse-x, 50%) var(--mouse-y, 50%), 
+                var(--card-glow, rgba(59, 130, 246, 0.15)), 
+                transparent 60%
+            );
+            opacity: 0;
+            transition: opacity 0.4s ease;
+            pointer-events: none;
         }
 
         .card:hover {
-            transform: translateY(-8px) scale(1.02);
-            border-color: rgba(59, 130, 246, 0.4);
-            background: rgba(255, 255, 255, 0.06);
-            box-shadow: 0 20px 60px rgba(59, 130, 246, 0.2);
+            transform: translateY(-18px) scale(1.03);
+            border-color: var(--card-border, rgba(59, 130, 246, 0.6));
+            background: rgba(255, 255, 255, 0.09);
+            box-shadow: 
+                0 32px 95px var(--card-shadow, rgba(59, 130, 246, 0.38)), 
+                0 18px 45px rgba(0, 0, 0, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.12);
         }
 
         .card:hover::before {
-            transform: scaleX(1);
+            opacity: 1;
         }
 
-        /* DRAG & DROP STYLES */
+        .card:hover::after {
+            opacity: 1;
+        }
+
+        .card:hover .card-actions {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
         .card.dragging {
             opacity: 0.5;
             cursor: grabbing;
@@ -506,60 +604,95 @@ if ($busqueda) {
 
         .drag-handle {
             position: absolute;
-            top: 12px;
-            right: 48px;
-            width: 30px;
-            height: 30px;
+            top: 20px;
+            left: 20px;
+            width: 40px;
+            height: 40px;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #6b7280;
+            color: #8b949e;
             font-size: 1.1em;
             opacity: 0;
-            transition: all 0.3s ease;
+            transition: all 0.4s ease;
             cursor: grab;
             z-index: 10;
-            pointer-events: all;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(12px);
+            border-radius: 10px;
+            border: 2px solid rgba(255, 255, 255, 0.15);
         }
 
         .card:hover .drag-handle {
-            opacity: 1;
+            opacity: 0.8;
+            transform: translateY(0);
         }
 
         .drag-handle:hover {
-            color: #3b82f6;
-            transform: scale(1.2);
+            opacity: 1 !important;
+            color: var(--card-color, #3b82f6);
+            background: var(--card-drag-bg, rgba(59, 130, 246, 0.25));
+            border-color: var(--card-border, rgba(59, 130, 246, 0.5));
+            transform: scale(1.1) rotate(5deg);
         }
 
         .drag-handle:active {
             cursor: grabbing;
+            transform: scale(0.95);
         }
 
         .card-header {
             display: flex;
-            align-items: flex-start;
-            gap: 16px;
-            margin-bottom: 16px;
+            align-items: center;
+            gap: 24px;
+            padding: 32px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .card:hover .card-header {
+            padding-top: 36px;
         }
 
         .card-icon-wrapper {
-            width: 56px;
-            height: 56px;
-            border-radius: 12px;
+            width: 90px;
+            height: 90px;
+            border-radius: 20px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.8em;
+            font-size: 2.5em;
             flex-shrink: 0;
-            transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+            transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+            background-size: cover;
+            background-position: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            position: relative;
+        }
+
+        .card-icon-wrapper::before {
+            content: '';
+            position: absolute;
+            inset: -3px;
+            border-radius: 22px;
+            background: var(--card-gradient);
+            opacity: 0;
+            transition: opacity 0.4s ease;
+            z-index: -1;
+            filter: blur(8px);
         }
 
         .card:hover .card-icon-wrapper {
-            transform: scale(1.1) rotate(-5deg);
+            transform: scale(1.22) rotate(-11deg);
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+        }
+
+        .card:hover .card-icon-wrapper::before {
+            opacity: 0.8;
         }
 
         .card.dragging .card-icon-wrapper {
-            transform: scale(1.2) rotate(15deg);
+            transform: scale(1.25) rotate(15deg);
         }
 
         .card-content {
@@ -568,52 +701,157 @@ if ($busqueda) {
         }
 
         .card-title {
-            font-size: 1.25em;
-            font-weight: 600;
+            font-size: 1.6em;
+            font-weight: 700;
             color: white;
             text-decoration: none;
             display: block;
-            margin-bottom: 6px;
+            margin-bottom: 12px;
             word-break: break-word;
-            transition: color 0.2s ease;
+            transition: all 0.3s ease;
+            letter-spacing: -0.5px;
+            line-height: 1.2;
         }
 
         .card:hover .card-title {
-            color: #3b82f6;
+            color: var(--card-color, #60a5fa);
+            transform: translateX(7px);
+            text-shadow: 0 0 22px var(--card-glow, rgba(96, 165, 250, 0.55));
+        }
+
+        .card-description {
+            font-size: 0.95em;
+            color: #b0b7c3;
+            margin-top: 12px;
+            line-height: 1.7;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .card-badges {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+            flex-wrap: wrap;
         }
 
         .badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 6px;
-            font-size: 0.75em;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 10px;
+            font-size: 0.85em;
             font-weight: 600;
-            background: rgba(59, 130, 246, 0.15);
-            color: #60a5fa;
-            border: 1px solid rgba(59, 130, 246, 0.2);
+            background: var(--badge-bg, rgba(59, 130, 246, 0.15));
+            color: var(--badge-color, #60a5fa);
+            border: 1px solid var(--badge-border, rgba(59, 130, 246, 0.3));
+            transition: all 0.3s ease;
+        }
+
+        .card:hover .badge {
+            background: var(--badge-bg-hover, rgba(59, 130, 246, 0.25));
+            border-color: var(--badge-border-hover, rgba(59, 130, 246, 0.5));
+            transform: translateY(-4px);
+            box-shadow: 0 8px 20px var(--badge-shadow, rgba(59, 130, 246, 0.4));
         }
 
         .card-info {
             display: flex;
-            flex-direction: column;
-            gap: 10px;
-            margin-top: 16px;
-            padding-top: 16px;
-            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            gap: 32px;
+            padding: 24px 32px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(0, 0, 0, 0.2);
         }
 
         .info-item {
             display: flex;
             align-items: center;
-            gap: 10px;
-            color: #8b949e;
-            font-size: 0.9em;
+            gap: 12px;
+            color: #9ca3af;
+            font-size: 0.95em;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+
+        .card:hover .info-item {
+            color: #e5e7eb;
         }
 
         .info-item i {
-            width: 18px;
+            width: 22px;
             color: #6b7280;
-            font-size: 0.95em;
+            font-size: 1.1em;
+            transition: all 0.3s ease;
+        }
+
+        .card:hover .info-item i {
+            color: var(--card-color, #3b82f6);
+            transform: scale(1.2);
+        }
+
+        /* Acciones de la Card */
+        .card-actions {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+            opacity: 0;
+            transform: translateY(-10px);
+            transition: all 0.4s ease;
+            z-index: 15;
+        }
+
+        .card-action-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(12px);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 1.1em;
+        }
+
+        .card-action-btn:hover {
+            transform: scale(1.15) translateY(-3px);
+        }
+
+        .card-action-btn.customize {
+            background: rgba(139, 92, 246, 0.7);
+            border-color: rgba(139, 92, 246, 0.8);
+        }
+
+        .card-action-btn.customize:hover {
+            background: rgba(139, 92, 246, 0.95);
+            border-color: rgba(139, 92, 246, 1);
+            box-shadow: 0 10px 30px rgba(139, 92, 246, 0.5);
+        }
+
+        .card-action-btn.favorite {
+            background: rgba(0, 0, 0, 0.6);
+            border-color: rgba(251, 191, 36, 0.4);
+        }
+
+        .card-action-btn.favorite.active {
+            background: rgba(251, 191, 36, 0.3);
+            color: #fbbf24;
+            border-color: rgba(251, 191, 36, 0.8);
+        }
+
+        .card-action-btn.favorite:hover {
+            background: rgba(251, 191, 36, 0.4);
+            border-color: rgba(251, 191, 36, 1);
+            color: #fbbf24;
+            box-shadow: 0 10px 30px rgba(251, 191, 36, 0.4);
         }
 
         .list-view .card {
@@ -721,6 +959,208 @@ if ($busqueda) {
             font-size: 1.2em;
         }
 
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1001;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(5px);
+        }
+
+        .modal.show {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #161b22;
+            border-radius: 16px;
+            padding: 30px;
+            max-width: 500px;
+            width: 90%;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            animation: modalSlideIn 0.3s ease;
+        }
+
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+
+        .modal-header h2 {
+            font-size: 1.5em;
+            color: white;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: #8b949e;
+            font-size: 1.5em;
+            cursor: pointer;
+            transition: color 0.2s ease;
+        }
+
+        .modal-close:hover {
+            color: white;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            color: #c9d1d9;
+            margin-bottom: 8px;
+            font-size: 0.95em;
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            color: white;
+            font-size: 1em;
+            transition: all 0.2s ease;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #3b82f6;
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .color-icon-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .color-option,
+        .icon-option {
+            width: 100%;
+            aspect-ratio: 1;
+            border-radius: 8px;
+            border: 2px solid transparent;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.3em;
+        }
+
+        .color-option:hover,
+        .icon-option:hover {
+            transform: scale(1.1);
+        }
+
+        .color-option.selected,
+        .icon-option.selected {
+            border-color: white;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+        }
+
+        .icon-option {
+            background: rgba(255, 255, 255, 0.05);
+            color: white;
+        }
+
+        .image-upload-area {
+            border: 2px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .image-upload-area:hover {
+            border-color: #3b82f6;
+            background: rgba(59, 130, 246, 0.05);
+        }
+
+        .image-upload-area.has-image {
+            padding: 0;
+            border: none;
+        }
+
+        .image-preview {
+            width: 100%;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(59, 130, 246, 0.3);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            color: #c9d1d9;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+
         @keyframes slideInRight {
             from {
                 transform: translateX(400px);
@@ -780,6 +1220,33 @@ if ($busqueda) {
                 width: 100%;
                 justify-content: center;
             }
+
+            .color-icon-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+
+            .card {
+                min-height: 240px;
+            }
+
+            .card-icon-wrapper {
+                width: 70px;
+                height: 70px;
+                font-size: 2em;
+            }
+
+            .card-title {
+                font-size: 1.3em;
+            }
+
+            .card-header {
+                padding: 24px;
+            }
+
+            .card-info {
+                padding: 20px 24px;
+                gap: 20px;
+            }
         }
 
         .empty-state {
@@ -797,6 +1264,8 @@ if ($busqueda) {
         .empty-state p {
             font-size: 1.2em;
         }
+
+        /* Eliminado - ahora está en card-actions */
     </style>
 </head>
 <body>
@@ -808,7 +1277,7 @@ if ($busqueda) {
         <?php if ($mostrarVolver): ?>
             <a href=".." class="back-arrow">
                 <i class="fas fa-arrow-left"></i>
-                <span>Volver</span>
+                <span>Back</span>
             </a>
         <?php endif; ?>
 
@@ -817,59 +1286,62 @@ if ($busqueda) {
                 <i class="fas fa-code logo-icon"></i>
                 <h1>CodeHub</h1>
             </div>
-            <p class="subtitle">Centro de control de proyectos - Arrastra para reorganizar</p>
+            <p class="subtitle">Project Control Center - Drag to reorder</p>
         </header>
 
         <div class="controls">
             <div class="controls-left">
                 <div class="search-box">
-                    <input type="text" id="searchInput" placeholder="Buscar proyectos..." autocomplete="off">
+                    <input type="text" id="searchInput" placeholder="Search projects..." autocomplete="off">
                     <i class="fas fa-search"></i>
                 </div>
            
                 <div class="action-buttons">
-                     
-                <div class="filter-dropdown" >
-                    <button class="dropdown-toggle" id="sortToggle">
-                        <i class="fas fa-sort"></i>
-                        <i class="fas fa-chevron-down" style="font-size: 0.8em; margin-left: 4px;"></i>
+                    <button class="btn-action btn-create" id="createFolderBtn">
+                        <i class="fas fa-folder-plus"></i>
+                        New Folder
                     </button>
-                    <div class="dropdown-menu" id="sortMenu">
-                        <div class="dropdown-item active" data-sort="name-asc">
-                            <i class="fas fa-sort-alpha-down"></i>
-                            Nombre (A-Z)
-                        </div>
-                        <div class="dropdown-item" data-sort="name-desc">
-                            <i class="fas fa-sort-alpha-up"></i>
-                            Nombre (Z-A)
-                        </div>
-                        <div class="dropdown-item" data-sort="date-new">
-                            <i class="fas fa-clock"></i>
-                            Más recientes
-                        </div>
-                        <div class="dropdown-item" data-sort="date-old">
-                            <i class="fas fa-history"></i>
-                            Más antiguos
+                     
+                    <div class="filter-dropdown" hidden>
+                        <button class="dropdown-toggle" id="sortToggle" >
+                            <i class="fas fa-sort"></i>
+                            <i class="fas fa-chevron-down" style="font-size: 0.8em; margin-left: 4px;"></i>
+                        </button>
+                        <div class="dropdown-menu" id="sortMenu">
+                            <div class="dropdown-item active" data-sort="name-asc">
+                                <i class="fas fa-sort-alpha-down"></i>
+                                Name (A-Z)
+                            </div>
+                            <div class="dropdown-item" data-sort="name-desc">
+                                <i class="fas fa-sort-alpha-up"></i>
+                                Name (Z-A)
+                            </div>
+                            <div class="dropdown-item" data-sort="date-new">
+                                <i class="fas fa-clock"></i>
+                                Most Recent
+                            </div>
+                            <div class="dropdown-item" data-sort="date-old">
+                                <i class="fas fa-history"></i>
+                                Oldest
+                            </div>
                         </div>
                     </div>
-                </div>
-                <button class="btn-action" id="refreshBtn" title="Recargar proyectos">
-                    <i class="fas fa-sync-alt"></i>
-                </button>
-                <div class="view-controls">
-                    <button class="btn-view active" id="gridView" title="Vista de cuadrícula">
-                        <i class="fas fa-th"></i>
+                    <button class="btn-action" id="refreshBtn" title="Refresh projects">
+                        <i class="fas fa-sync-alt"></i>
                     </button>
-                    <button class="btn-view" id="listView" title="Vista de lista">
-                        <i class="fas fa-list"></i>
-                    </button>
+                    <div class="view-controls">
+                        <button class="btn-view active" id="gridView" title="Grid view">
+                            <i class="fas fa-th"></i>
+                        </button>
+                        <button class="btn-view" id="listView" title="List view">
+                            <i class="fas fa-list"></i>
+                        </button>
+                    </div>
                 </div>
-            </div>
             </div>
             
-     
             <div class="stats">
-                <span><i class="fas fa-folder"></i> <span id="projectCount"><?= count($carpetas) ?></span> proyectos</span>
+                <span><i class="fas fa-folder"></i> <span id="projectCount"><?= count($carpetas) ?></span> projects</span>
             </div>
         </div>
 
@@ -880,27 +1352,74 @@ if ($busqueda) {
                         $info = detectarTipoProyecto($carpeta);
                         $numArchivos = contarArchivos($carpeta);
                         $ultimaMod = ultimaModificacion($carpeta);
+                        
+                        // Cargar configuración personalizada
+                        $customInfo = $customConfig[$carpeta] ?? [];
+                        $icono = $customInfo['icono'] ?? $info['icono'];
+                        $color = $customInfo['color'] ?? $info['color'];
+                        $imagen = $customInfo['imagen'] ?? null;
+                        $descripcion = $customInfo['descripcion'] ?? null;
+                        
+                        // Calcular colores derivados para efectos
+                        $colorRGB = sscanf($color, "#%02x%02x%02x");
+                        $glowColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.15)";
+                        $borderColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.6)";
+                        $shadowColor = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.35)";
+                        $badgeBg = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.15)";
+                        $badgeBorder = "rgba({$colorRGB[0]}, {$colorRGB[1]}, {$colorRGB[2]}, 0.3)";
                     ?>
-                    <div class="card" draggable="true" data-carpeta="<?= htmlspecialchars($carpeta) ?>" data-tipo="<?= strtolower($info['tipo']) ?>" data-fecha="<?= filemtime($carpeta) ?>">
-                        <div class="drag-handle"><i class="fas fa-grip-vertical"></i></div>
-                        <i class="far fa-star favorite-star" data-carpeta="<?= htmlspecialchars($carpeta) ?>"></i>
+                    <div class="card" draggable="true" 
+                         data-carpeta="<?= htmlspecialchars($carpeta) ?>" 
+                         data-tipo="<?= strtolower($info['tipo']) ?>" 
+                         data-fecha="<?= filemtime($carpeta) ?>"
+                         style="--card-color: <?= $color ?>; 
+                                --card-gradient: linear-gradient(90deg, <?= $color ?>, <?= $color ?>dd);
+                                --card-glow: <?= $glowColor ?>;
+                                --card-border: <?= $borderColor ?>;
+                                --card-shadow: <?= $shadowColor ?>;
+                                --badge-bg: <?= $badgeBg ?>;
+                                --badge-border: <?= $badgeBorder ?>;
+                                --badge-bg-hover: rgba(<?= $colorRGB[0] ?>, <?= $colorRGB[1] ?>, <?= $colorRGB[2] ?>, 0.25);
+                                --badge-border-hover: rgba(<?= $colorRGB[0] ?>, <?= $colorRGB[1] ?>, <?= $colorRGB[2] ?>, 0.5);
+                                --badge-shadow: <?= $shadowColor ?>;
+                                --badge-color: <?= $color ?>;
+                                --card-drag-bg: rgba(<?= $colorRGB[0] ?>, <?= $colorRGB[1] ?>, <?= $colorRGB[2] ?>, 0.25);">
+                        <div class="drag-handle" title="Drag to reorder"><i class="fas fa-grip-vertical"></i></div>
+                        
+                        <div class="card-actions">
+                            <div class="card-action-btn customize" onclick="abrirModalPersonalizar('<?= htmlspecialchars($carpeta) ?>', event)" title="Customize">
+                                <i class="fas fa-paint-brush"></i>
+                            </div>
+                            <div class="card-action-btn favorite" data-carpeta="<?= htmlspecialchars($carpeta) ?>" title="Favorite">
+                                <i class="far fa-star"></i>
+                            </div>
+                        </div>
+
                         <div class="card-header" onclick="window.location.href='<?= htmlspecialchars($carpeta) ?>'">
-                            <div class="card-icon-wrapper" style="background: linear-gradient(135deg, <?= $info['color'] ?>22, <?= $info['color'] ?>44);">
-                                <i class="fas <?= $info['icono'] ?>" style="color: <?= $info['color'] ?>"></i>
+                            <div class="card-icon-wrapper" 
+                                 style="<?= $imagen ? 'background-image: url(' . htmlspecialchars($imagen) . ');' : 'background: linear-gradient(135deg, ' . $color . '22, ' . $color . '44);' ?>">
+                                <?php if (!$imagen): ?>
+                                    <i class="fas <?= $icono ?>" style="color: <?= $color ?>"></i>
+                                <?php endif; ?>
                             </div>
                             <div class="card-content">
                                 <a href="<?= htmlspecialchars($carpeta) ?>" class="card-title"><?= htmlspecialchars($carpeta) ?></a>
-                                <span class="badge"><?= $info['tipo'] ?></span>
+                                <div class="card-badges">
+                                    <span class="badge"><i class="fas fa-tag"></i> <?= $info['tipo'] ?></span>
+                                </div>
+                                <?php if ($descripcion): ?>
+                                    <div class="card-description"><?= htmlspecialchars($descripcion) ?></div>
+                                <?php endif; ?>
                             </div>
                         </div>
                         <div class="card-info">
                             <div class="info-item">
                                 <i class="fas fa-file-code"></i>
-                                <span><?= $numArchivos ?> archivos</span>
+                                <span><?= $numArchivos ?> files</span>
                             </div>
                             <div class="info-item">
                                 <i class="fas fa-clock"></i>
-                                <span>Hace <?= $ultimaMod ?></span>
+                                <span><?= $ultimaMod ?></span>
                             </div>
                         </div>
                     </div>
@@ -911,27 +1430,119 @@ if ($busqueda) {
         <?php if (count($carpetas) == 0): ?>
             <div class="empty-state">
                 <i class="fas fa-folder-open"></i>
-                <p>No hay proyectos para mostrar</p>
+                <p>No projects to display</p>
             </div>
         <?php endif; ?>
     </div>
 
+    <!-- Modal Crear Carpeta -->
+    <div class="modal" id="modalCrearCarpeta">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-folder-plus"></i> New Folder</h2>
+                <button class="modal-close" onclick="cerrarModal('modalCrearCarpeta')">&times;</button>
+            </div>
+            <form id="formCrearCarpeta">
+                <div class="form-group">
+                    <label>Folder name</label>
+                    <input type="text" id="nombreCarpeta" placeholder="my-project" required>
+                </div>
+                <button type="submit" class="btn-primary">
+                    <i class="fas fa-check"></i> Create Folder
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal Crear Archivo -->
+    <div class="modal" id="modalCrearArchivo">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-file-code"></i> New File</h2>
+                <button class="modal-close" onclick="cerrarModal('modalCrearArchivo')">&times;</button>
+            </div>
+            <form id="formCrearArchivo">
+                <div class="form-group">
+                    <label>File name</label>
+                    <input type="text" id="nombreArchivo" placeholder="index.html" required>
+                </div>
+                <input type="hidden" id="carpetaArchivo">
+                <button type="submit" class="btn-primary">
+                    <i class="fas fa-check"></i> Create File
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal Personalizar -->
+    <div class="modal" id="modalPersonalizar">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-paint-brush"></i> Customize Project</h2>
+                <button class="modal-close" onclick="cerrarModal('modalPersonalizar')">&times;</button>
+            </div>
+            <form id="formPersonalizar">
+                <input type="hidden" id="carpetaPersonalizar">
+                
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea id="descripcionPersonalizar" placeholder="Describe your project..."></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Icon color</label>
+                    <div class="color-icon-grid" id="coloresGrid"></div>
+                </div>
+
+                <div class="form-group">
+                    <label>Icon</label>
+                    <div class="color-icon-grid" id="iconosGrid"></div>
+                </div>
+
+                <div class="form-group">
+                    <label>Custom image (optional)</label>
+                    <div class="image-upload-area" id="imageUploadArea">
+                        <i class="fas fa-image" style="font-size: 2em; color: #8b949e; margin-bottom: 10px;"></i>
+                        <p style="color: #8b949e;">Click to upload an image</p>
+                        <input type="file" id="imagenPersonalizar" accept="image/*" style="display: none;">
+                    </div>
+                </div>
+
+                <button type="submit" class="btn-primary">
+                    <i class="fas fa-save"></i> Save Changes
+                </button>
+                <button type="button" class="btn-secondary" onclick="cerrarModal('modalPersonalizar')">
+                    Cancel
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Menú Contextual -->
     <div id="contextMenu">
+        <div class="menu-item" id="personalizarCard">
+            <i class="fas fa-paint-brush"></i>
+            <span>Customize</span>
+        </div>
+        <div class="menu-item" id="crearArchivo">
+            <i class="fas fa-file-code"></i>
+            <span>Create File</span>
+        </div>
         <div class="menu-item" id="abrirVscode">
             <i class="fas fa-code"></i>
-            <span>Abrir con VS Code</span>
+            <span>Open with VS Code</span>
         </div>
         <div class="menu-item" id="abrirExplorer">
             <i class="fas fa-folder-open"></i>
-            <span>Abrir en Explorador</span>
+            <span>Open in Explorer</span>
         </div>
         <div class="menu-item" id="abrirTerminal">
             <i class="fas fa-terminal"></i>
-            <span>Abrir Terminal</span>
+            <span>Open Terminal</span>
         </div>
         <div class="menu-item" id="copiarRuta">
             <i class="fas fa-copy"></i>
-            <span>Copiar ruta</span>
+            <span>Copy path</span>
         </div>
     </div>
 
@@ -949,6 +1560,24 @@ if ($busqueda) {
         let draggedCard = null;
         let cardOrder = JSON.parse(localStorage.getItem('codehub_card_order') || '[]');
 
+        // Colores e iconos disponibles
+        const colores = [
+            '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', 
+            '#10b981', '#06b6d4', '#ef4444', '#6366f1',
+            '#14b8a6', '#f97316', '#a855f7', '#22c55e'
+        ];
+
+        const iconos = [
+            'fa-code', 'fa-laptop-code', 'fa-terminal', 'fa-database',
+            'fa-server', 'fa-mobile-alt', 'fa-globe', 'fa-rocket',
+            'fa-cog', 'fa-palette', 'fa-chart-line', 'fa-shopping-cart',
+           
+        ];
+
+        let selectedColor = colores[0];
+        let selectedIcon = iconos[0];
+        let uploadedImage = null;
+
         // Inicializar orden de cards
         function initCardOrder() {
             const cards = Array.from(document.querySelectorAll('.card'));
@@ -957,7 +1586,6 @@ if ($busqueda) {
                 cardOrder = cards.map(card => card.getAttribute('data-carpeta'));
                 localStorage.setItem('codehub_card_order', JSON.stringify(cardOrder));
             } else {
-                // Reorganizar cards según el orden guardado
                 const grid = document.getElementById('projectGrid');
                 const orderedCards = [];
                 
@@ -966,7 +1594,6 @@ if ($busqueda) {
                     if (card) orderedCards.push(card);
                 });
                 
-                // Agregar cards que no están en el orden guardado
                 cards.forEach(card => {
                     if (!orderedCards.includes(card)) {
                         orderedCards.push(card);
@@ -1055,43 +1682,228 @@ if ($busqueda) {
                 setTimeout(() => {
                     this.classList.remove('dropping');
                     allCards.forEach(card => grid.appendChild(card));
-                    mostrarNotificacion('Orden guardado correctamente');
+                    mostrarNotificacion('Order saved successfully');
                 }, 100);
             }
             
             return false;
         }
 
+        // Modales
+        function abrirModal(modalId) {
+            document.getElementById(modalId).classList.add('show');
+        }
+
+        function cerrarModal(modalId) {
+            document.getElementById(modalId).classList.remove('show');
+        }
+
+        function abrirModalPersonalizar(carpeta, event) {
+            event.stopPropagation();
+            document.getElementById('carpetaPersonalizar').value = carpeta;
+            generarColoresGrid();
+            generarIconosGrid();
+            abrirModal('modalPersonalizar');
+        }
+
+        // Generar grids de colores e iconos
+        function generarColoresGrid() {
+            const grid = document.getElementById('coloresGrid');
+            grid.innerHTML = '';
+            colores.forEach(color => {
+                const div = document.createElement('div');
+                div.className = 'color-option';
+                div.style.background = color;
+                div.onclick = () => {
+                    document.querySelectorAll('.color-option').forEach(el => el.classList.remove('selected'));
+                    div.classList.add('selected');
+                    selectedColor = color;
+                };
+                grid.appendChild(div);
+            });
+            grid.firstChild.classList.add('selected');
+        }
+
+        function generarIconosGrid() {
+            const grid = document.getElementById('iconosGrid');
+            grid.innerHTML = '';
+            iconos.forEach(icono => {
+                const div = document.createElement('div');
+                div.className = 'icon-option';
+                div.innerHTML = `<i class="fas ${icono}"></i>`;
+                div.onclick = () => {
+                    document.querySelectorAll('.icon-option').forEach(el => el.classList.remove('selected'));
+                    div.classList.add('selected');
+                    selectedIcon = icono;
+                };
+                grid.appendChild(div);
+            });
+            grid.firstChild.classList.add('selected');
+        }
+
+        // Upload de imagen
+        document.getElementById('imageUploadArea').addEventListener('click', () => {
+            document.getElementById('imagenPersonalizar').click();
+        });
+
+        document.getElementById('imagenPersonalizar').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const area = document.getElementById('imageUploadArea');
+                    area.innerHTML = `<img src="${e.target.result}" class="image-preview">`;
+                    area.classList.add('has-image');
+                    uploadedImage = file;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // Form crear carpeta
+        document.getElementById('createFolderBtn').addEventListener('click', () => {
+            abrirModal('modalCrearCarpeta');
+        });
+
+        document.getElementById('formCrearCarpeta').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const nombre = document.getElementById('nombreCarpeta').value;
+            
+            const formData = new FormData();
+            formData.append('nombre', nombre);
+            
+            const response = await fetch('?accion=crear_carpeta', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            mostrarNotificacion(result.mensaje);
+            
+            if (result.success) {
+                cerrarModal('modalCrearCarpeta');
+                setTimeout(() => location.reload(), 1000);
+            }
+        });
+
+        // Form crear archivo
+        document.getElementById('formCrearArchivo').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const nombre = document.getElementById('nombreArchivo').value;
+            const carpeta = document.getElementById('carpetaArchivo').value;
+            
+            const formData = new FormData();
+            formData.append('nombre', nombre);
+            formData.append('carpeta', carpeta);
+            
+            const response = await fetch('?accion=crear_archivo', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            mostrarNotificacion(result.mensaje);
+            
+            if (result.success) {
+                cerrarModal('modalCrearArchivo');
+            }
+        });
+
+        // Form personalizar
+        document.getElementById('formPersonalizar').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const carpeta = document.getElementById('carpetaPersonalizar').value;
+            const descripcion = document.getElementById('descripcionPersonalizar').value;
+            
+            let imagenUrl = null;
+            
+            // Si hay imagen, subirla primero
+            if (uploadedImage) {
+                const formData = new FormData();
+                formData.append('imagen', uploadedImage);
+                formData.append('carpeta', carpeta);
+                
+                const uploadResponse = await fetch('?accion=subir_imagen', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const uploadResult = await uploadResponse.json();
+                if (uploadResult.success) {
+                    imagenUrl = uploadResult.imagen;
+                }
+            }
+            
+            // Guardar configuración
+            const configData = new FormData();
+            configData.append('carpeta', carpeta);
+            configData.append('icono', selectedIcon);
+            configData.append('color', selectedColor);
+            configData.append('descripcion', descripcion);
+            if (imagenUrl) {
+                configData.append('imagen', imagenUrl);
+            }
+            
+            const response = await fetch('?accion=guardar_config', {
+                method: 'POST',
+                body: configData
+            });
+            
+            const result = await response.json();
+            mostrarNotificacion(result.mensaje);
+            
+            if (result.success) {
+                cerrarModal('modalPersonalizar');
+                setTimeout(() => location.reload(), 1000);
+            }
+        });
+
         // Inicializar favoritos
         function initFavorites() {
             favorites.forEach(fav => {
-                const star = document.querySelector(`.favorite-star[data-carpeta="${fav}"]`);
-                if (star) {
-                    star.classList.remove('far');
-                    star.classList.add('fas', 'active');
+                const favBtn = document.querySelector(`.card-action-btn.favorite[data-carpeta="${fav}"]`);
+                if (favBtn) {
+                    favBtn.classList.add('active');
+                    const icon = favBtn.querySelector('i');
+                    icon.classList.remove('far');
+                    icon.classList.add('fas');
                 }
             });
         }
 
         // Toggle favorito
-        document.querySelectorAll('.favorite-star').forEach(star => {
-            star.addEventListener('click', (e) => {
+        document.querySelectorAll('.card-action-btn.favorite').forEach(btn => {
+            btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const carpeta = star.getAttribute('data-carpeta');
+                const carpeta = btn.getAttribute('data-carpeta');
+                const icon = btn.querySelector('i');
                 
                 if (favorites.includes(carpeta)) {
                     favorites = favorites.filter(f => f !== carpeta);
-                    star.classList.remove('fas', 'active');
-                    star.classList.add('far');
-                    mostrarNotificacion('Eliminado de favoritos');
+                    btn.classList.remove('active');
+                    icon.classList.remove('fas');
+                    icon.classList.add('far');
+                    mostrarNotificacion('Removed from favorites');
                 } else {
                     favorites.push(carpeta);
-                    star.classList.remove('far');
-                    star.classList.add('fas', 'active');
-                    mostrarNotificacion('Agregado a favoritos');
+                    btn.classList.add('active');
+                    icon.classList.remove('far');
+                    icon.classList.add('fas');
+                    mostrarNotificacion('Added to favorites');
                 }
                 
                 localStorage.setItem('codehub_favorites', JSON.stringify(favorites));
+            });
+        });
+
+        // Efecto de mouse en las cards
+        document.querySelectorAll('.card').forEach(card => {
+            card.addEventListener('mousemove', (e) => {
+                const rect = card.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 100;
+                const y = ((e.clientY - rect.top) / rect.height) * 100;
+                card.style.setProperty('--mouse-x', `${x}%`);
+                card.style.setProperty('--mouse-y', `${y}%`);
             });
         });
 
@@ -1160,7 +1972,6 @@ if ($busqueda) {
             
             cards.forEach(card => grid.appendChild(card));
             
-            // Actualizar orden guardado
             cardOrder = cards.map(card => card.getAttribute('data-carpeta'));
             localStorage.setItem('codehub_card_order', JSON.stringify(cardOrder));
         }
@@ -1170,12 +1981,23 @@ if ($busqueda) {
             fetch(`?accion=${accion}&carpeta=${encodeURIComponent(selectedFolder)}`)
                 .then(response => response.json())
                 .then(() => {
-                    mostrarNotificacion(`Abriendo ${accion}...`);
+                    mostrarNotificacion(`Opening ${accion}...`);
                 })
                 .catch(() => {
-                    mostrarNotificacion('Error al ejecutar la acción');
+                    mostrarNotificacion('Error executing action');
                 });
         }
+
+        document.getElementById('personalizarCard').addEventListener('click', () => {
+            contextMenu.style.display = 'none';
+            abrirModalPersonalizar(selectedFolder, new Event('click'));
+        });
+
+        document.getElementById('crearArchivo').addEventListener('click', () => {
+            contextMenu.style.display = 'none';
+            document.getElementById('carpetaArchivo').value = selectedFolder;
+            abrirModal('modalCrearArchivo');
+        });
 
         document.getElementById('abrirVscode').addEventListener('click', () => ejecutarAccion('vscode'));
         document.getElementById('abrirExplorer').addEventListener('click', () => ejecutarAccion('explorer'));
@@ -1270,18 +2092,33 @@ if ($busqueda) {
                 document.querySelectorAll('.dropdown-menu').forEach(menu => {
                     menu.classList.remove('show');
                 });
+                document.querySelectorAll('.modal').forEach(modal => {
+                    modal.classList.remove('show');
+                });
             }
             if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
                 e.preventDefault();
                 document.getElementById('refreshBtn').click();
             }
-            // Resetear orden con Ctrl+Shift+R
+            if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+                e.preventDefault();
+                abrirModal('modalCrearCarpeta');
+            }
             if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'R') {
                 e.preventDefault();
                 cardOrder = [];
                 localStorage.removeItem('codehub_card_order');
                 mostrarNotificacion('Orden restaurado - Recarga la página');
             }
+        });
+
+        // Cerrar modales al hacer click fuera
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    modal.classList.remove('show');
+                }
+            });
         });
 
         // Inicializar todo
