@@ -729,7 +729,7 @@ if ($busqueda) {
         }
 
         .card-title {
-            font-size: 1.6em;
+            font-size: 1.2em;
             font-weight: 700;
             color: white;
             text-decoration: none;
@@ -771,7 +771,7 @@ if ($busqueda) {
             gap: 8px;
             padding: 8px 16px;
             border-radius: 10px;
-            font-size: 0.85em;
+            font-size: 0.75em;
             font-weight: 600;
             background: var(--badge-bg, rgba(59, 130, 246, 0.15));
             color: var(--badge-color, #60a5fa);
