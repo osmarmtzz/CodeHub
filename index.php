@@ -1,8 +1,8 @@
 <?php
 /**
  * CodeHub — Project Dashboard
- * Fixed & Enhanced Version
  */
+define('CH_VERSION', '2.1.0');
 
 /* ── HELPERS ─────────────────────────────────────────────── */
 function e($s) { return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
@@ -19,6 +19,15 @@ function ago($t) {
 function fc($d) {
     $items = glob("$d/*");
     return $items ? count($items) : 0;
+}
+
+function rrmdir(string $dir): void {
+    if (!is_dir($dir)) return;
+    foreach (array_diff(scandir($dir) ?: [], ['.','..']) as $f) {
+        $p = $dir . DIRECTORY_SEPARATOR . $f;
+        is_dir($p) ? rrmdir($p) : unlink($p);
+    }
+    rmdir($dir);
 }
 
 function detectType($dir) {
@@ -47,19 +56,43 @@ function detectType($dir) {
 
 /* ── PATHS ───────────────────────────────────────────────── */
 $baseDir  = __DIR__;
-$cfgFile  = $baseDir . DIRECTORY_SEPARATOR . '.codehub_config.json';
-$datFile  = $baseDir . DIRECTORY_SEPARATOR . '.codehub_data.json';
-$trashDir = $baseDir . DIRECTORY_SEPARATOR . '.codehub_trash';
-$imgDir   = $baseDir . DIRECTORY_SEPARATOR . '.codehub_images';
+$dataDir  = $baseDir . DIRECTORY_SEPARATOR . '.codehub';
+$cfgFile  = $dataDir . DIRECTORY_SEPARATOR . 'config.json';
+$datFile  = $dataDir . DIRECTORY_SEPARATOR . 'data.json';
+$prefsFile= $dataDir . DIRECTORY_SEPARATOR . 'prefs.json';
+$trashDir = $dataDir . DIRECTORY_SEPARATOR . 'trash';
+$imgDir   = $dataDir . DIRECTORY_SEPARATOR . 'images';
+
+// Crear carpeta .codehub si no existe
+if (!is_dir($dataDir)) mkdir($dataDir, 0755, true);
+
+// ── Migración automática de archivos viejos ──────────────
+$_migrate = [
+    $baseDir.DIRECTORY_SEPARATOR.'.codehub_config.json' => $cfgFile,
+    $baseDir.DIRECTORY_SEPARATOR.'.codehub_data.json'   => $datFile,
+    $baseDir.DIRECTORY_SEPARATOR.'.codehub_prefs.json'  => $prefsFile,
+];
+foreach ($_migrate as $_old => $_new) {
+    if (file_exists($_old) && !file_exists($_new)) rename($_old, $_new);
+    elseif (file_exists($_old)) unlink($_old);
+}
+// carpetas
+foreach ([
+    $baseDir.DIRECTORY_SEPARATOR.'.codehub_trash'  => $trashDir,
+    $baseDir.DIRECTORY_SEPARATOR.'.codehub_images' => $imgDir,
+] as $_old => $_new) {
+    if (is_dir($_old) && !is_dir($_new)) rename($_old, $_new);
+    elseif (is_dir($_old)) {} // ya migrado, dejar
+}
 
 // Normalized base path for safe comparisons
 $baseDirNorm = rtrim(str_replace('\\','/',$baseDir),'/');
 
-$ignore = ['.','..','index.php','index.html','.codehub_config.json',
-           '.codehub_images','.codehub_data.json','.codehub_trash'];
+$ignore = ['.','..','index.php','index.html','.codehub'];
 
-$cfg = file_exists($cfgFile) ? (json_decode(file_get_contents($cfgFile),true) ?: []) : [];
-$dat = file_exists($datFile)  ? (json_decode(file_get_contents($datFile), true) ?: []) : [];
+$cfg   = file_exists($cfgFile)   ? (json_decode(file_get_contents($cfgFile),  true) ?: []) : [];
+$dat   = file_exists($datFile)   ? (json_decode(file_get_contents($datFile),   true) ?: []) : [];
+$prefs = file_exists($prefsFile) ? (json_decode(file_get_contents($prefsFile), true) ?: []) : [];
 
 $mostrarVolver = rtrim(str_replace('\\','/',realpath($baseDir)),'/') !==
                  rtrim(str_replace('\\','/',realpath($_SERVER['DOCUMENT_ROOT'])),'/');
@@ -164,6 +197,28 @@ if (isset($_GET['a'])) {
         exit;
     }
 
+    /* Restore from trash */
+    if ($a === 'restore' && isset($_POST['d'])) {
+        $itemName = basename(trim($_POST['d']));
+        $trashPath = $trashDir . DIRECTORY_SEPARATOR . $itemName;
+        if (!is_dir($trashPath)) { echo json_encode(['ok'=>false,'m'=>'Not found in trash']); exit; }
+        $origName = preg_replace('/_\d+$/', '', $itemName);
+        $destPath = $baseDir . DIRECTORY_SEPARATOR . $origName;
+        if (file_exists($destPath)) $destPath = $baseDir . DIRECTORY_SEPARATOR . $origName . '_restored_' . time();
+        echo rename($trashPath, $destPath) ? json_encode(['ok'=>true]) : json_encode(['ok'=>false,'m'=>'Could not restore']);
+        exit;
+    }
+
+    /* Permanently delete from trash */
+    if ($a === 'perm_del' && isset($_POST['d'])) {
+        $itemName = basename(trim($_POST['d']));
+        $trashPath = $trashDir . DIRECTORY_SEPARATOR . $itemName;
+        if (!is_dir($trashPath)) { echo json_encode(['ok'=>false,'m'=>'Not found in trash']); exit; }
+        rrmdir($trashPath);
+        echo json_encode(['ok'=>true]);
+        exit;
+    }
+
     /* Save config */
     if ($a === 'cfg' && isset($_POST['d'])) {
         $k = basename(trim($_POST['d']));
@@ -178,6 +233,7 @@ if (isset($_GET['a'])) {
             'tags' => isset($_POST['tags']) ? (json_decode($_POST['tags'],true) ?: []) : ($existing['tags'] ?? []),
             'rate' => isset($_POST['rate']) ? (int)$_POST['rate'] : ($existing['rate'] ?? 0),
             'url'  => $_POST['url']  ?? ($existing['url']  ?? ''),
+            'group'=> $_POST['group'] ?? ($existing['group'] ?? ''),
         ]);
         file_put_contents($cfgFile, json_encode($cfg, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
         echo json_encode(['ok'=>true]);
@@ -216,6 +272,28 @@ if (isset($_GET['a'])) {
         exit;
     }
 
+    /* Save / load user preferences */
+    if ($a === 'prefs') {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            // fetch(FormData) → $_POST['data']
+            // sendBeacon(URLSearchParams) → php://input como URL-encoded
+            if (isset($_POST['data'])) {
+                $raw = $_POST['data'];
+            } else {
+                parse_str(file_get_contents('php://input'), $pb);
+                $raw = $pb['data'] ?? null;
+            }
+            if ($raw) {
+                $newPrefs = json_decode($raw, true);
+                if (is_array($newPrefs) || is_object($newPrefs)) {
+                    file_put_contents($prefsFile, json_encode($newPrefs, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+                    echo json_encode(['ok'=>true]); exit;
+                }
+            }
+        }
+        echo json_encode(['ok'=>false,'m'=>'bad request']); exit;
+    }
+
     /* Upload image */
     if ($a === 'img' && isset($_FILES['f'], $_POST['d'])) {
         if (!file_exists($imgDir)) mkdir($imgDir, 0755, true);
@@ -225,7 +303,7 @@ if (isset($_GET['a'])) {
         }
         $nm = md5($_POST['d'].time()).'.'.$ext;
         if (move_uploaded_file($_FILES['f']['tmp_name'], $imgDir.DIRECTORY_SEPARATOR.$nm)) {
-            echo json_encode(['ok'=>true,'img'=>'.codehub_images/'.$nm]);
+            echo json_encode(['ok'=>true,'img'=>'.codehub/images/'.$nm]);
         } else {
             echo json_encode(['ok'=>false,'m'=>'Upload failed']);
         }
@@ -290,6 +368,16 @@ if (isset($_GET['a'])) {
         exit;
     }
 
+    /* Scan folders — used for auto-detect polling */
+    if ($a === 'scan') {
+        $dirs = [];
+        foreach (array_diff(scandir($baseDir) ?: [], $ignore) as $name) {
+            if (is_dir($baseDir . DIRECTORY_SEPARATOR . $name)) $dirs[] = $name;
+        }
+        echo json_encode(['ok'=>true,'dirs'=>$dirs]);
+        exit;
+    }
+
     echo json_encode(['ok'=>false,'m'=>'Unknown action']);
     exit;
 }
@@ -310,13 +398,14 @@ foreach ($scanned as $name) {
         'tipo'    => $tipo,
         'ico'     => $c['ico'] ?? $ico,
         'col'     => $c['col'] ?? $col,
-        'img'     => $c['img'] ?? null,
+        'img'     => isset($c['img']) ? str_replace('.codehub_images/','.codehub/images/',$c['img']) : null,
         'desc'    => $c['desc'] ?? null,
         'pin'     => $c['pin'] ?? false,
         'st'      => $c['st']  ?? 'active',
         'tags'    => $c['tags'] ?? [],
         'rate'    => $c['rate'] ?? 0,
         'url'     => $c['url']  ?? '',
+        'group'   => $c['group'] ?? '',
         'note'    => $d['note'] ?? '',
         'note_ts' => $d['note_ts'] ?? null,
         'todos'   => $todos,
@@ -326,6 +415,8 @@ foreach ($scanned as $name) {
         'mtime'   => $mtime,
         'ago'     => ago($mtime),
         'pend'    => count(array_filter($todos, fn($t)=>!($t['done']??false))),
+        'todos_total' => count($todos),
+        'todos_done'  => count(array_filter($todos, fn($t)=>($t['done']??false))),
     ];
 }
 usort($projects, fn($a,$b) => $a['pin']&&!$b['pin'] ? -1 : (!$a['pin']&&$b['pin'] ? 1 : strcmp($a['name'],$b['name'])));
@@ -343,6 +434,38 @@ $allTags = [];
 foreach ($projects as $p) foreach ($p['tags'] as $t) $allTags[$t] = ($allTags[$t]??0)+1;
 arsort($allTags);
 
+/* ── GROUPS ──────────────────────────────────────────── */
+$groupedProjects = [];
+$ungroupedProjects = [];
+foreach ($projects as $p) {
+    $g = trim($p['group'] ?? '');
+    if ($g !== '') $groupedProjects[$g][] = $p;
+    else $ungroupedProjects[] = $p;
+}
+$allGroupNames = array_keys($groupedProjects);
+
+/* ── TRASH ───────────────────────────────────────────── */
+$trashItems = [];
+if (file_exists($trashDir)) {
+    foreach (array_diff(scandir($trashDir) ?: [], ['.','..']) as $name) {
+        $fullPath = $trashDir . DIRECTORY_SEPARATOR . $name;
+        if (!is_dir($fullPath)) continue;
+        [$tipo,$ico,$col] = detectType($fullPath);
+        $trashItems[] = [
+            'name'     => $name,
+            'origName' => preg_replace('/_\d+$/', '', $name),
+            'tipo'     => $tipo,
+            'ico'      => $ico,
+            'col'      => $col,
+            'files'    => fc($fullPath),
+            'mtime'    => filemtime($fullPath),
+            'ago'      => ago(filemtime($fullPath)),
+        ];
+    }
+    usort($trashItems, fn($a,$b) => $b['mtime'] - $a['mtime']);
+}
+$trashCount = count($trashItems);
+
 /* ── CARD RENDERER ───────────────────────────────────────── */
 function renderCard(array $p): string {
     $name    = $p['name'];
@@ -355,10 +478,15 @@ function renderCard(array $p): string {
     $rate    = $p['rate'];
     $st      = $p['st'];
     $pin     = $p['pin'];
-    $pend    = $p['pend'];
-    $opens   = $p['opens'];
-    $note    = $p['note'];
-    $isRecent = (time()-$p['mtime']) < 604800;
+    $pend        = $p['pend'];
+    $opens       = $p['opens'];
+    $note        = $p['note'];
+    $group       = $p['group'] ?? '';
+    $url         = $p['url']   ?? '';
+    $todosTotal  = $p['todos_total'] ?? 0;
+    $todosDone   = $p['todos_done']  ?? 0;
+    $todoPct     = $todosTotal > 0 ? round($todosDone/$todosTotal*100) : 0;
+    $isRecent    = (time()-$p['mtime']) < 604800;
 
     // Safe hex-to-rgb
     $rgb = '130,140,255';
@@ -374,14 +502,13 @@ function renderCard(array $p): string {
     ];
     [$stClass,$stLabel] = $stMap[$st] ?? ['sp-active','Active'];
 
-    $stars = implode('', array_map(fn($i)=>'<i class="fas fa-star star'.($i<=$rate?' on':'').'"></i>', range(1,5)));
-
     ob_start(); ?>
 <div class="card <?= $pin?'pinned':'' ?>"
      data-name="<?=e($name)?>" data-type="<?=strtolower($tipo)?>" data-mt="<?=$p['mtime']?>"
      data-files="<?=$p['files']?>" data-opens="<?=$opens?>" data-rate="<?=$rate?>"
      data-st="<?=$st?>" data-recent="<?=$isRecent?'1':'0'?>" data-note="<?=!empty($note)?'1':'0'?>"
      data-desc="<?=e($desc??'')?>" data-tags="<?=e(json_encode($tags))?>"
+     data-group="<?=e($p['group']??'')?>"
      style="--c:<?=$col?>">
   <div class="drag-h"><i class="fas fa-grip-vertical"></i></div>
   <div class="card-cb"><i class="fas fa-check"></i></div>
@@ -406,16 +533,23 @@ function renderCard(array $p): string {
         </div>
         <?php if($desc):?><div class="c-desc"><?=e($desc)?></div><?php endif;?>
         <?php if(!empty($tags)):?>
-          <div class="c-tags"><?php foreach(array_slice($tags,0,4) as $t):?><span class="ctag">#<?=e($t)?></span><?php endforeach;?></div>
+          <div class="c-tags"><?php foreach(array_slice($tags,0,4) as $t):?><span class="ctag"><?=e($t)?></span><?php endforeach;?></div>
         <?php endif;?>
-        <?php if($rate>0):?><div class="c-stars"><?=$stars?></div><?php endif;?>
+        <?php if($group):?><div class="card-group-badge"><i class="fas fa-layer-group"></i><?=e($group)?></div><?php endif;?>
       </div>
     </div>
   </div>
+  <?php if($todosTotal>0):?>
+  <div class="todo-prog" title="<?=$todosDone?>/<?=$todosTotal?> tareas completadas">
+    <div class="tp-bar"><div class="tp-fill" style="width:<?=$todoPct?>%;--c:<?=$col?>"></div></div>
+    <span class="tp-lbl"><?=$todosDone?>/<?=$todosTotal?></span>
+  </div>
+  <?php endif;?>
   <div class="card-foot">
     <span class="cf-m"><i class="fas fa-file-alt"></i><?=$p['files']?></span>
     <span class="cf-m"><i class="fas fa-clock"></i><?=$p['ago']?></span>
-    <?php if($opens>0):?><span class="cf-m"><i class="fas fa-eye"></i><?=$opens?></span><?php endif;?>
+    <?php if($opens>0):?><span class="cf-m cf-opens"><i class="fas fa-eye"></i><?=$opens?></span><?php endif;?>
+    <?php if($url):?><span class="cf-m cf-url" title="<?=e($url)?>"><i class="fas fa-link"></i></span><?php endif;?>
     <div class="cf-sp"></div>
     <div class="qas">
       <?php if($p['url']):?><button class="qa-btn" onclick="event.stopPropagation();window.open('<?=e($p['url'])?>','_blank')" title="Open URL"><i class="fas fa-external-link-alt"></i></button><?php endif;?>
@@ -449,95 +583,105 @@ html{scroll-behavior:smooth}
 /* ═══════════════════════════════════════════
    THEMES
 ═══════════════════════════════════════════ */
+/* ── dark: Abyss — deep black-teal, vivid cyan ── */
 [data-theme="dark"]{
-  --bg:#010d0e;--bg2:#031618;--bg3:#061f23;--bg4:#0a2b30;--bg5:#0e3840;
-  --glass:rgba(11,135,145,.03);--glass2:rgba(11,135,145,.065);
-  --bdr:rgba(11,135,145,.15);--bdr2:rgba(11,135,145,.28);--bdr3:rgba(11,135,145,.46);
-  --txt:#c8f0f4;--txt2:#2e8a92;--txt3:#0f4a50;
-  --acc:#0b8791;--acc2:#00d4e0;--acc3:rgba(11,135,145,.16);--acc4:rgba(11,135,145,.07);
-  --warm:#ff6040;--warm2:#ff9070;--grn:#00e5aa;--red:#ff3d5a;--ylw:#ffe040;--pnk:#ff40c8;
-  --shadow:0 24px 64px rgba(0,0,0,.88)
+  --bg:#010608;--bg2:#020e14;--bg3:#041820;--bg4:#06242e;--bg5:#09303e;
+  --glass:rgba(0,200,210,.022);--glass2:rgba(0,200,210,.055);
+  --bdr:rgba(0,200,210,.13);--bdr2:rgba(0,200,210,.26);--bdr3:rgba(0,200,210,.46);
+  --txt:#c6f4f8;--txt2:#1a7080;--txt3:#063640;
+  --acc:#00b8c8;--acc2:#00e8f8;--acc3:rgba(0,184,200,.15);--acc4:rgba(0,184,200,.07);
+  --warm:#ff6040;--warm2:#ff9070;--grn:#00e5aa;--red:#ff3d5a;--ylw:#ffe040;--pnk:#f472b6;
+  --shadow:0 24px 64px rgba(0,0,0,.94)
 }
+/* ── midnight: Galaxy — near-black, electric indigo ── */
 [data-theme="midnight"]{
-  --bg:#000;--bg2:#030508;--bg3:#060b12;--bg4:#0a1220;--bg5:#0d192e;
-  --glass:rgba(0,220,255,.018);--glass2:rgba(0,220,255,.04);
-  --bdr:rgba(0,200,255,.08);--bdr2:rgba(0,200,255,.16);--bdr3:rgba(0,200,255,.28);
-  --txt:#d0f4ff;--txt2:#2e6888;--txt3:#0e2d40;
-  --acc:#00d4ff;--acc2:#66e8ff;--acc3:rgba(0,212,255,.1);--acc4:rgba(0,212,255,.05);
-  --warm:#ff4f7b;--warm2:#ff80a0;--grn:#00ff9f;--red:#ff4f7b;--ylw:#ffe566;--pnk:#cc55ff;
-  --shadow:0 24px 64px rgba(0,0,0,.85)
+  --bg:#02020d;--bg2:#04041c;--bg3:#07072c;--bg4:#0b0b3c;--bg5:#0f0f4c;
+  --glass:rgba(99,102,241,.02);--glass2:rgba(99,102,241,.048);
+  --bdr:rgba(99,102,241,.11);--bdr2:rgba(99,102,241,.22);--bdr3:rgba(99,102,241,.4);
+  --txt:#e0e4ff;--txt2:#3c3ca0;--txt3:#18186a;
+  --acc:#6366f1;--acc2:#818cf8;--acc3:rgba(99,102,241,.14);--acc4:rgba(99,102,241,.07);
+  --warm:#f97316;--warm2:#fb923c;--grn:#34d399;--red:#f87171;--ylw:#fde047;--pnk:#e879f9;
+  --shadow:0 24px 64px rgba(0,0,0,.96)
 }
+/* ── forest: Emerald — rich forest green, vivid accent ── */
 [data-theme="forest"]{
-  --bg:#040a06;--bg2:#081410;--bg3:#0e1e18;--bg4:#142820;--bg5:#1a3228;
-  --glass:rgba(74,222,128,.022);--glass2:rgba(74,222,128,.048);
-  --bdr:rgba(74,222,128,.09);--bdr2:rgba(74,222,128,.18);--bdr3:rgba(74,222,128,.3);
-  --txt:#d8f5e8;--txt2:#3d8060;--txt3:#153824;
-  --acc:#4ade80;--acc2:#86efac;--acc3:rgba(74,222,128,.12);--acc4:rgba(74,222,128,.06);
-  --warm:#fb923c;--warm2:#fdba74;--grn:#4ade80;--red:#f87171;--ylw:#fde047;--pnk:#f472b6;
-  --shadow:0 24px 64px rgba(0,0,0,.72)
-}
-[data-theme="rose"]{
-  --bg:#0c0409;--bg2:#180814;--bg3:#220d1e;--bg4:#2e1228;--bg5:#3a1832;
-  --glass:rgba(251,113,133,.022);--glass2:rgba(251,113,133,.048);
-  --bdr:rgba(251,113,133,.09);--bdr2:rgba(251,113,133,.18);--bdr3:rgba(251,113,133,.32);
-  --txt:#ffe4f0;--txt2:#994466;--txt3:#521830;
-  --acc:#fb7185;--acc2:#fda4af;--acc3:rgba(251,113,133,.12);--acc4:rgba(251,113,133,.06);
-  --warm:#f97316;--warm2:#fb923c;--grn:#34d399;--red:#ef4444;--ylw:#fbbf24;--pnk:#e879f9;
-  --shadow:0 24px 64px rgba(0,0,0,.72)
-}
-[data-theme="dusk"]{
-  --bg:#0c0618;--bg2:#130b26;--bg3:#1c1136;--bg4:#261845;--bg5:#301f54;
-  --glass:rgba(167,139,250,.025);--glass2:rgba(167,139,250,.052);
-  --bdr:rgba(167,139,250,.1);--bdr2:rgba(167,139,250,.2);--bdr3:rgba(167,139,250,.36);
-  --txt:#ede4ff;--txt2:#7a5aaa;--txt3:#3c1e70;
-  --acc:#a78bfa;--acc2:#c4b5fd;--acc3:rgba(167,139,250,.13);--acc4:rgba(167,139,250,.06);
-  --warm:#fb923c;--warm2:#fdba74;--grn:#6ee7b7;--red:#f87171;--ylw:#fde047;--pnk:#f0abfc;
-  --shadow:0 24px 64px rgba(0,0,0,.75)
-}
-[data-theme="ocean"]{
-  --bg:#010d10;--bg2:#02161e;--bg3:#04202c;--bg4:#062c3c;--bg5:#08384c;
-  --glass:rgba(20,184,166,.022);--glass2:rgba(20,184,166,.048);
-  --bdr:rgba(20,184,166,.09);--bdr2:rgba(20,184,166,.19);--bdr3:rgba(20,184,166,.34);
-  --txt:#ccfbf1;--txt2:#2a7a6e;--txt3:#0c3830;
-  --acc:#2dd4bf;--acc2:#5eead4;--acc3:rgba(45,212,191,.12);--acc4:rgba(45,212,191,.06);
-  --warm:#f97316;--warm2:#fb923c;--grn:#4ade80;--red:#f87171;--ylw:#fbbf24;--pnk:#e879f9;
-  --shadow:0 24px 64px rgba(0,0,0,.82)
-}
-[data-theme="dracula"]{
-  --bg:#0f0f1a;--bg2:#181824;--bg3:#21212f;--bg4:#2a2a3c;--bg5:#333348;
-  --glass:rgba(189,147,249,.022);--glass2:rgba(189,147,249,.048);
-  --bdr:rgba(98,114,164,.14);--bdr2:rgba(98,114,164,.26);--bdr3:rgba(98,114,164,.44);
-  --txt:#f8f8f2;--txt2:#6272a4;--txt3:#30355a;
-  --acc:#bd93f9;--acc2:#d6b8fe;--acc3:rgba(189,147,249,.13);--acc4:rgba(189,147,249,.065);
-  --warm:#ffb86c;--warm2:#ffd08a;--grn:#50fa7b;--red:#ff5555;--ylw:#f1fa8c;--pnk:#ff79c6;
-  --shadow:0 24px 64px rgba(0,0,0,.72)
-}
-[data-theme="amber"]{
-  --bg:#0a0602;--bg2:#140d04;--bg3:#1e1408;--bg4:#281c0c;--bg5:#322410;
-  --glass:rgba(252,211,77,.018);--glass2:rgba(252,211,77,.038);
-  --bdr:rgba(245,158,11,.1);--bdr2:rgba(245,158,11,.2);--bdr3:rgba(245,158,11,.36);
-  --txt:#fffbeb;--txt2:#927020;--txt3:#4a3008;
-  --acc:#fcd34d;--acc2:#fde68a;--acc3:rgba(252,211,77,.13);--acc4:rgba(252,211,77,.065);
-  --warm:#ea580c;--warm2:#f97316;--grn:#86efac;--red:#fca5a5;--ylw:#fde047;--pnk:#fda4af;
-  --shadow:0 24px 64px rgba(0,0,0,.78)
-}
-[data-theme="neon"]{
-  --bg:#010102;--bg2:#040408;--bg3:#07070f;--bg4:#0c0c18;--bg5:#121220;
-  --glass:rgba(57,255,20,.018);--glass2:rgba(57,255,20,.038);
-  --bdr:rgba(57,255,20,.08);--bdr2:rgba(57,255,20,.17);--bdr3:rgba(57,255,20,.3);
-  --txt:#e8ffe4;--txt2:#1e6818;--txt3:#082408;
-  --acc:#39ff14;--acc2:#80ff60;--acc3:rgba(57,255,20,.1);--acc4:rgba(57,255,20,.05);
-  --warm:#ff0080;--warm2:#ff40a0;--grn:#39ff14;--red:#ff0055;--ylw:#ffff00;--pnk:#ff00ff;
+  --bg:#020804;--bg2:#041208;--bg3:#071c0e;--bg4:#0b2816;--bg5:#0f341e;
+  --glass:rgba(16,185,129,.022);--glass2:rgba(16,185,129,.05);
+  --bdr:rgba(16,185,129,.11);--bdr2:rgba(16,185,129,.22);--bdr3:rgba(16,185,129,.4);
+  --txt:#d1fae5;--txt2:#0e6e44;--txt3:#043426;
+  --acc:#10b981;--acc2:#34d399;--acc3:rgba(16,185,129,.14);--acc4:rgba(16,185,129,.07);
+  --warm:#f59e0b;--warm2:#fbbf24;--grn:#10b981;--red:#f87171;--ylw:#fde047;--pnk:#f472b6;
   --shadow:0 24px 64px rgba(0,0,0,.9)
 }
+/* ── rose: Sakura — velvet dark, cherry blossom pink ── */
+[data-theme="rose"]{
+  --bg:#080308;--bg2:#120512;--bg3:#1e091e;--bg4:#280d28;--bg5:#321132;
+  --glass:rgba(236,72,153,.02);--glass2:rgba(236,72,153,.048);
+  --bdr:rgba(236,72,153,.11);--bdr2:rgba(236,72,153,.22);--bdr3:rgba(236,72,153,.4);
+  --txt:#fce7f3;--txt2:#982860;--txt3:#5c0c3a;
+  --acc:#ec4899;--acc2:#f9a8d4;--acc3:rgba(236,72,153,.14);--acc4:rgba(236,72,153,.07);
+  --warm:#f97316;--warm2:#fb923c;--grn:#34d399;--red:#f43f5e;--ylw:#fde68a;--pnk:#d946ef;
+  --shadow:0 24px 64px rgba(0,0,0,.94)
+}
+/* ── dusk: Void — deep cosmic purple, electric violet ── */
+[data-theme="dusk"]{
+  --bg:#050212;--bg2:#090420;--bg3:#100830;--bg4:#180c42;--bg5:#201054;
+  --glass:rgba(139,92,246,.022);--glass2:rgba(139,92,246,.055);
+  --bdr:rgba(139,92,246,.12);--bdr2:rgba(139,92,246,.24);--bdr3:rgba(139,92,246,.44);
+  --txt:#ede8ff;--txt2:#5e38b0;--txt3:#2c1474;
+  --acc:#8b5cf6;--acc2:#c4b5fd;--acc3:rgba(139,92,246,.15);--acc4:rgba(139,92,246,.07);
+  --warm:#fb923c;--warm2:#fdba74;--grn:#6ee7b7;--red:#f87171;--ylw:#fde047;--pnk:#f0abfc;
+  --shadow:0 24px 64px rgba(0,0,0,.94)
+}
+/* ── ocean: Deep Sea — pacific dark, bright teal ── */
+[data-theme="ocean"]{
+  --bg:#010810;--bg2:#021420;--bg3:#042030;--bg4:#062c42;--bg5:#083854;
+  --glass:rgba(20,184,166,.022);--glass2:rgba(20,184,166,.052);
+  --bdr:rgba(20,184,166,.11);--bdr2:rgba(20,184,166,.22);--bdr3:rgba(20,184,166,.4);
+  --txt:#ccfbf1;--txt2:#0f6858;--txt3:#043830;
+  --acc:#14b8a6;--acc2:#2dd4bf;--acc3:rgba(20,184,166,.14);--acc4:rgba(20,184,166,.07);
+  --warm:#f97316;--warm2:#fb923c;--grn:#4ade80;--red:#f87171;--ylw:#fbbf24;--pnk:#e879f9;
+  --shadow:0 24px 64px rgba(0,0,0,.92)
+}
+/* ── dracula: Phantom — dark charcoal, vivid magenta ── */
+[data-theme="dracula"]{
+  --bg:#0c0a18;--bg2:#141020;--bg3:#1e162e;--bg4:#281e3e;--bg5:#32264e;
+  --glass:rgba(255,121,198,.02);--glass2:rgba(255,121,198,.048);
+  --bdr:rgba(189,147,249,.13);--bdr2:rgba(189,147,249,.26);--bdr3:rgba(189,147,249,.46);
+  --txt:#f8f4ff;--txt2:#6060a8;--txt3:#303070;
+  --acc:#bd93f9;--acc2:#d6b8fe;--acc3:rgba(189,147,249,.15);--acc4:rgba(189,147,249,.07);
+  --warm:#ffb86c;--warm2:#ffd08a;--grn:#50fa7b;--red:#ff5555;--ylw:#f1fa8c;--pnk:#ff79c6;
+  --shadow:0 24px 64px rgba(0,0,0,.88)
+}
+/* ── amber: Ember — dark earth, molten gold ── */
+[data-theme="amber"]{
+  --bg:#080502;--bg2:#120a04;--bg3:#1e1006;--bg4:#2a160a;--bg5:#361c0e;
+  --glass:rgba(245,158,11,.018);--glass2:rgba(245,158,11,.042);
+  --bdr:rgba(245,158,11,.11);--bdr2:rgba(245,158,11,.24);--bdr3:rgba(245,158,11,.44);
+  --txt:#fffbeb;--txt2:#8c5c0c;--txt3:#442a04;
+  --acc:#f59e0b;--acc2:#fbbf24;--acc3:rgba(245,158,11,.15);--acc4:rgba(245,158,11,.07);
+  --warm:#ea580c;--warm2:#f97316;--grn:#86efac;--red:#fca5a5;--ylw:#fde047;--pnk:#fda4af;
+  --shadow:0 24px 64px rgba(0,0,0,.92)
+}
+/* ── neon: Synthwave — pitch black, electric magenta+cyan ── */
+[data-theme="neon"]{
+  --bg:#060208;--bg2:#0e0414;--bg3:#180622;--bg4:#220830;--bg5:#2c0a3e;
+  --glass:rgba(236,72,153,.018);--glass2:rgba(236,72,153,.04);
+  --bdr:rgba(236,72,153,.12);--bdr2:rgba(0,240,255,.18);--bdr3:rgba(236,72,153,.4);
+  --txt:#ffe8ff;--txt2:#8c2070;--txt3:#480c44;
+  --acc:#ec4899;--acc2:#00f0ff;--acc3:rgba(236,72,153,.14);--acc4:rgba(236,72,153,.07);
+  --warm:#7c3aed;--warm2:#a855f7;--grn:#00f0ff;--red:#ff2d55;--ylw:#fde047;--pnk:#c084fc;
+  --shadow:0 24px 64px rgba(0,0,0,.96)
+}
+/* ── nord: Steel — cool graphite, crisp arctic blue ── */
 [data-theme="nord"]{
-  --bg:#181c28;--bg2:#1e2232;--bg3:#242a3e;--bg4:#2c324a;--bg5:#343c56;
-  --glass:rgba(136,192,208,.022);--glass2:rgba(136,192,208,.048);
-  --bdr:rgba(136,192,208,.1);--bdr2:rgba(136,192,208,.2);--bdr3:rgba(136,192,208,.34);
-  --txt:#eceff4;--txt2:#7890a8;--txt3:#384462;
-  --acc:#88c0d0;--acc2:#9ecfdf;--acc3:rgba(136,192,208,.11);--acc4:rgba(136,192,208,.055);
+  --bg:#0c1018;--bg2:#121820;--bg3:#1a222e;--bg4:#222c3c;--bg5:#2c384e;
+  --glass:rgba(129,161,193,.018);--glass2:rgba(129,161,193,.04);
+  --bdr:rgba(129,161,193,.1);--bdr2:rgba(129,161,193,.2);--bdr3:rgba(129,161,193,.36);
+  --txt:#eceff4;--txt2:#4e6880;--txt3:#253448;
+  --acc:#5e81ac;--acc2:#88c0d0;--acc3:rgba(94,129,172,.13);--acc4:rgba(94,129,172,.065);
   --warm:#ebcb8b;--warm2:#f0d8a0;--grn:#a3be8c;--red:#bf616a;--ylw:#ebcb8b;--pnk:#b48ead;
-  --shadow:0 24px 64px rgba(0,0,0,.6)
+  --shadow:0 24px 64px rgba(0,0,0,.78)
 }
 
 :root{
@@ -643,16 +787,16 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 }
 .theme-dot:hover{transform:scale(1.14);border-color:var(--bdr2)}
 .theme-dot.on{border-color:rgba(255,255,255,.45);box-shadow:0 0 0 2px rgba(255,255,255,.12);transform:scale(1.1)}
-.theme-dot[data-t="dark"]{background:linear-gradient(135deg,#07080f 52%,#0e3840 52%)}
-.theme-dot[data-t="midnight"]{background:linear-gradient(135deg,#000 52%,#00d4ff 52%)}
-.theme-dot[data-t="forest"]{background:linear-gradient(135deg,#040a06 52%,#4ade80 52%)}
-.theme-dot[data-t="rose"]{background:linear-gradient(135deg,#0c0409 52%,#fb7185 52%)}
-.theme-dot[data-t="dusk"]{background:linear-gradient(135deg,#0c0618 52%,#a78bfa 52%)}
-.theme-dot[data-t="ocean"]{background:linear-gradient(135deg,#010d10 52%,#2dd4bf 52%)}
-.theme-dot[data-t="dracula"]{background:linear-gradient(135deg,#0f0f1a 52%,#bd93f9 52%)}
-.theme-dot[data-t="amber"]{background:linear-gradient(135deg,#0a0602 52%,#fcd34d 52%)}
-.theme-dot[data-t="neon"]{background:linear-gradient(135deg,#010102 52%,#39ff14 52%)}
-.theme-dot[data-t="nord"]{background:linear-gradient(135deg,#181c28 52%,#88c0d0 52%)}
+.theme-dot[data-t="dark"]{background:linear-gradient(135deg,#010608 52%,#00e8f8 52%)}
+.theme-dot[data-t="midnight"]{background:linear-gradient(135deg,#02020d 52%,#818cf8 52%)}
+.theme-dot[data-t="forest"]{background:linear-gradient(135deg,#020804 52%,#34d399 52%)}
+.theme-dot[data-t="rose"]{background:linear-gradient(135deg,#080308 52%,#f9a8d4 52%)}
+.theme-dot[data-t="dusk"]{background:linear-gradient(135deg,#050212 52%,#c4b5fd 52%)}
+.theme-dot[data-t="ocean"]{background:linear-gradient(135deg,#010810 52%,#2dd4bf 52%)}
+.theme-dot[data-t="dracula"]{background:linear-gradient(135deg,#0c0a18 52%,#d6b8fe 52%)}
+.theme-dot[data-t="amber"]{background:linear-gradient(135deg,#080502 52%,#fbbf24 52%)}
+.theme-dot[data-t="neon"]{background:linear-gradient(135deg,#060208 52%,#ec4899 52%)}
+.theme-dot[data-t="nord"]{background:linear-gradient(135deg,#0c1018 52%,#88c0d0 52%)}
 
 .sidebar-foot{margin-top:auto;padding-top:12px;border-top:1px solid var(--bdr)}
 .live-badge{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:.6em;color:var(--txt3)}
@@ -717,7 +861,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 /* ═══════════════════════════════════════════
    CONTENT
 ═══════════════════════════════════════════ */
-.content{flex:1;padding:22px 22px 60px;overflow-y:auto}
+.content{flex:1;padding:clamp(14px,2vw,26px) clamp(14px,2.2vw,28px) 60px;overflow-y:auto}
 .page-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px;gap:12px;flex-wrap:wrap}
 .page-title{font-size:1.5em;font-weight:800;letter-spacing:-.7px;line-height:1.1}
 .page-sub{font-family:var(--mono);font-size:.68em;color:var(--txt3);margin-top:4px}
@@ -821,6 +965,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 .card.selected{border-color:var(--acc)!important;box-shadow:0 0 0 2px rgba(11,135,145,.35)!important}
 .card.dragging{opacity:.18;transform:scale(.93) rotate(1.5deg);z-index:999}
 .card.dragover{border-color:var(--acc);border-style:dashed}
+.grid.drag-target{outline:2px dashed var(--acc);outline-offset:-4px;background:var(--acc4)}
 
 .card-cb{position:absolute;top:.65em;left:.65em;width:1.1em;height:1.1em;border-radius:.32em;border:1.5px solid var(--bdr2);background:var(--bg3);display:none;align-items:center;justify-content:center;z-index:20;transition:all .18s cubic-bezier(.34,1.56,.64,1);font-size:.55em;cursor:pointer}
 .card-cb.show{display:flex}
@@ -828,11 +973,50 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 .todo-badge{position:absolute;top:.55em;right:.55em;width:.52em;height:.52em;border-radius:50%;background:var(--red);z-index:10;box-shadow:0 0 8px rgba(255,61,90,.7),0 0 0 2px rgba(255,61,90,.2);animation:todoPulse 2.4s ease-in-out infinite}
 @keyframes todoPulse{0%,100%{box-shadow:0 0 8px rgba(255,61,90,.7),0 0 0 2px rgba(255,61,90,.2)}50%{box-shadow:0 0 16px rgba(255,61,90,.9),0 0 0 4px rgba(255,61,90,.15)}}
 
+/* ── Card group badge ── */
+.card-group-badge{
+  display:inline-flex;align-items:center;gap:.3em;
+  font-family:var(--mono);font-size:.52em;font-weight:600;
+  color:var(--txt3);margin-top:.32em;
+  letter-spacing:.3px
+}
+.card-group-badge i{font-size:.85em;color:var(--acc2);opacity:.7}
+.card-group-badge:hover{color:var(--acc2)}
+
+/* ── Todo progress bar ── */
+.todo-prog{
+  display:flex;align-items:center;gap:.5em;
+  padding:.28em 1em .22em;
+  border-top:1px solid rgba(11,135,145,.06)
+}
+.tp-bar{flex:1;height:3px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden}
+.tp-fill{height:100%;border-radius:99px;background:color-mix(in srgb,var(--c,var(--acc)) 80%,#fff);transition:width .4s cubic-bezier(.34,1.56,.64,1)}
+.tp-lbl{font-family:var(--mono);font-size:.5em;color:var(--txt3);flex-shrink:0;white-space:nowrap}
+
+/* ── URL indicator in footer ── */
+.cf-url{color:var(--acc2)!important;opacity:.7}
+
+/* ── Settings: hide card elements via data-* ── */
+[data-card-group="off"] .card-group-badge{display:none}
+[data-card-todos="off"] .todo-prog{display:none}
+[data-card-opens="off"] .cf-opens{display:none}
+[data-card-url="off"] .cf-url{display:none}
+
+/* ── Logo version badge ── */
+.logo-ver{font-size:.52em;font-weight:500;color:var(--txt3);letter-spacing:.5px;vertical-align:middle;margin-left:2px}
+
 .card-acts{position:absolute;top:.52em;right:.52em;display:flex;gap:.28em;opacity:0;transform:translateY(-7px) scale(.88);transition:opacity .26s,transform .34s cubic-bezier(.34,1.56,.64,1);z-index:15}
 .card:hover .card-acts,.card.selected .card-acts{opacity:1;transform:translateY(0) scale(1)}
 .ca-btn{width:1.72em;height:1.72em;border-radius:.46em;display:flex;align-items:center;justify-content:center;background:rgba(6,9,16,.9);backdrop-filter:blur(16px);border:1px solid var(--bdr2);color:var(--txt2);font-size:.68em;transition:all .22s cubic-bezier(.34,1.56,.64,1);cursor:pointer}
 .ca-btn:hover{transform:scale(1.22) translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.5)}
 .ca-btn.pin:hover,.ca-btn.pin.on{background:rgba(251,191,36,.2);border-color:var(--ylw);color:var(--ylw);box-shadow:0 0 12px rgba(251,191,36,.28)}
+/* Note button — amber tint always visible */
+.ca-btn.note{background:rgba(251,191,36,.13);border-color:rgba(251,191,36,.3);color:rgba(251,191,36,.8)}
+.ca-btn.note:hover{background:rgba(251,191,36,.28);border-color:var(--ylw);color:var(--ylw);box-shadow:0 0 14px rgba(251,191,36,.32)}
+.ca-btn.note.has{background:rgba(251,191,36,.22);border-color:var(--ylw);color:var(--ylw);box-shadow:0 0 8px rgba(251,191,36,.25)}
+/* Edit/Customize button — purple tint always visible */
+.ca-btn.edit{background:rgba(124,140,255,.15);border-color:rgba(124,140,255,.32);color:var(--acc2)}
+.ca-btn.edit:hover{background:rgba(124,140,255,.3);border-color:var(--acc2);box-shadow:0 0 14px rgba(124,140,255,.32)}
 .ca-btn.edit:hover{background:var(--acc3);border-color:var(--acc);color:var(--acc2);box-shadow:0 0 12px rgba(124,140,255,.24)}
 .ca-btn.note:hover,.ca-btn.note.has{background:rgba(52,211,153,.13);border-color:var(--grn);color:var(--grn);box-shadow:0 0 12px rgba(52,211,153,.24)}
 .ca-btn.go:hover{background:rgba(52,211,153,.15);border-color:var(--grn);color:var(--grn);box-shadow:0 0 12px rgba(52,211,153,.24)}
@@ -908,20 +1092,28 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 }
 .card:hover .c-desc{color:var(--txt);border-left-color:color-mix(in srgb,var(--c,var(--acc)) 55%,transparent)}
 
-.c-tags{display:flex;flex-wrap:wrap;gap:.26em;margin-top:auto;padding-top:.35em}
+.c-tags{display:flex;flex-wrap:wrap;gap:.3em;margin-top:.42em;padding-top:.1em}
 .ctag{
-  padding:.18em .48em;border-radius:.38em;
-  font-family:var(--mono);font-size:.58em;
-  background:color-mix(in srgb,var(--c,var(--acc)) 10%,var(--acc4));
-  color:color-mix(in srgb,var(--c,var(--acc)) 60%,var(--acc2));
-  border:1px solid color-mix(in srgb,var(--c,var(--acc)) 24%,rgba(124,140,255,.15));
-  transition:all .24s cubic-bezier(.34,1.56,.64,1)
+  padding:.2em .55em;border-radius:99px;
+  font-family:var(--mono);font-size:.56em;font-weight:600;letter-spacing:.2px;
+  display:inline-flex;align-items:center;gap:.3em;
+  transition:all .2s cubic-bezier(.34,1.56,.64,1)
 }
-.ctag:hover{
-  background:color-mix(in srgb,var(--c,var(--acc)) 22%,var(--acc3));
-  transform:translateY(-2px) scale(1.1);
-  box-shadow:0 4px 12px color-mix(in srgb,var(--c,var(--acc)) 24%,transparent)
+/* First tag = language — accent color of card */
+.ctag:nth-child(1){
+  background:color-mix(in srgb,var(--c,var(--acc)) 18%,transparent);
+  color:color-mix(in srgb,var(--c,var(--acc)) 90%,#fff);
+  border:1px solid color-mix(in srgb,var(--c,var(--acc)) 38%,transparent);
 }
+.ctag:nth-child(1)::before{content:'';width:.52em;height:.52em;border-radius:50%;background:color-mix(in srgb,var(--c,var(--acc)) 80%,#fff);flex-shrink:0}
+/* Other tags = frameworks — neutral muted */
+.ctag:nth-child(n+2){
+  background:rgba(124,140,255,.08);
+  color:var(--txt2);
+  border:1px solid rgba(124,140,255,.18);
+}
+.ctag:nth-child(n+2)::before{content:'';width:.4em;height:.4em;border-radius:50%;background:var(--acc2);opacity:.6;flex-shrink:0}
+.ctag:hover{transform:translateY(-2px) scale(1.08);box-shadow:0 4px 10px rgba(0,0,0,.22)}
 .c-stars{display:flex;gap:.18em;margin-top:auto;padding-top:.3em}
 .star{font-size:.72em;color:var(--bdr2);transition:color .16s,transform .22s cubic-bezier(.34,1.56,.64,1),filter .16s}
 .star.on{color:var(--ylw);filter:drop-shadow(0 0 4px rgba(251,191,36,.55))}
@@ -947,39 +1139,163 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 .qa-btn.trm:hover{border-color:var(--grn);color:var(--grn);background:rgba(52,211,153,.11);box-shadow:0 4px 12px rgba(52,211,153,.18)}
 .info-btn{color:var(--acc2)!important}
 
-/* Compact view */
-.compact .c-desc,.compact .c-tags,.compact .c-stars{display:none}
+/* ═══════════════════════════════════════════
+   COMPACT VIEW — icon tiles
+═══════════════════════════════════════════ */
+.compact .card{min-height:unset}
 .compact .card-body{padding:0}
-.compact .card-top{padding:.72em .85em;min-height:unset}
-.compact .c-thumb{width:2.4em;height:2.4em;font-size:1em;margin-top:0}
-.compact .card-foot{padding:.42em .85em}
+.compact .card-top{
+  flex-direction:column;align-items:center;text-align:center;
+  padding:1.15em .7em .6em;gap:.46em}
+.compact .c-thumb{
+  width:2.9em;height:2.9em;font-size:1.15em;margin-top:0;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb,var(--c,var(--acc)) 40%,transparent),
+    0 6px 20px color-mix(in srgb,var(--c,var(--acc)) 28%,transparent)}
+.compact .card:hover .c-thumb{transform:scale(1.12) rotate(-8deg)}
+.compact .c-info{align-items:center;width:100%;gap:.14em}
+.compact .c-name{
+  font-size:.82em;white-space:normal;text-align:center;
+  display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.compact .c-meta-row{justify-content:center;flex-wrap:wrap;gap:.22em}
+.compact .type-badge{font-size:.55em}
+.compact .status-pill{font-size:.52em}
+.compact .c-desc,.compact .c-stars,.compact .card-group-badge{display:none}
+.compact .todo-prog{padding:.2em .5em}
+.compact .c-tags{
+  display:flex!important;justify-content:center;flex-wrap:wrap;gap:.18em;
+  padding-top:.22em;margin-top:0;max-width:100%}
+.compact .c-tags .ctag{font-size:.5em;padding:.1em .35em}
+.compact .card-foot{
+  padding:.42em .55em;justify-content:center;flex-wrap:wrap;gap:.18em;
+  border-top:1px solid rgba(11,135,145,.08)}
+.compact .cf-m{font-size:.54em}
+.compact .cf-sp{display:none}
+.compact .qas{opacity:1!important;transform:none!important;gap:.18em;flex-wrap:wrap;justify-content:center}
+.compact .qa-btn{font-size:.55em;padding:.22em .42em}
+.compact .card-acts{opacity:1!important;transform:none!important;top:.38em;right:.38em}
+.compact .ca-btn{width:1.5em;height:1.5em;font-size:.6em}
+.compact .drag-h{display:none}
 
-/* List view */
-.list .card{flex-direction:row;align-items:center;min-height:unset;border-left-width:2px}
-.list .card-body{flex:1;padding:.62em .9em;display:flex;align-items:center;gap:.7em;position:relative}
-.list .card-top{position:static;display:flex;flex-direction:row;align-items:center;gap:.6em;min-height:unset;padding:0;flex:1}
-.list .c-thumb{width:2.15em;height:2.15em;font-size:.95em;flex-shrink:0;margin-top:0}
-.list .card:hover .c-thumb{transform:scale(1.1) rotate(-6deg)}
-.list .c-info{flex:1;gap:.1em}
-.list .c-desc,.list .c-tags,.list .c-stars{display:none}
-.list .card-foot{padding:0 .8em;border-top:none;border-left:1px solid rgba(11,135,145,.1);min-width:12em;background:none;position:static}
-.list .card-acts{position:static;opacity:1;transform:none;margin-right:4px}
-.list .qas{opacity:1;transform:none}
-.list .card:hover{transform:none;border-left-color:color-mix(in srgb,var(--c,var(--acc)) 80%,transparent);box-shadow:inset 3px 0 0 color-mix(in srgb,var(--c,var(--acc)) 75%,transparent),0 4px 16px rgba(0,0,0,.22)}
+/* ═══════════════════════════════════════════
+   LIST VIEW — rich data rows
+═══════════════════════════════════════════ */
+.list .card{
+  flex-direction:row;align-items:stretch;min-height:unset;
+  border-left-width:3px;border-top:1px solid transparent;
+  animation-name:listIn}
+@keyframes listIn{
+  from{opacity:0;transform:translateX(-10px)}
+  to{opacity:1;transform:translateX(0)}}
+/* reorder flex children: body → foot → acts */
+.list .card-acts{
+  order:20;position:static;opacity:1!important;transform:none!important;
+  display:flex;flex-direction:column;justify-content:center;
+  gap:.22em;padding:.55em .6em;flex-shrink:0;
+  border-left:1px solid rgba(11,135,145,.07)}
+.list .card-body{
+  order:1;flex:1;padding:.6em 1em;
+  display:flex;align-items:center;gap:.75em;min-width:0}
+.list .card-foot{
+  order:10;padding:0 .85em;min-width:8em;
+  border-top:none;border-left:1px solid rgba(11,135,145,.07);
+  background:none;position:static;
+  display:flex;flex-direction:column;align-items:flex-end;
+  justify-content:center;gap:.18em;flex-shrink:0}
+/* card-top → row inside card-body */
+.list .card-top{
+  position:static;display:flex;flex-direction:row;
+  align-items:center;gap:.6em;min-height:unset;padding:0;flex:1;min-width:0}
+.list .c-thumb{
+  width:2.05em;height:2.05em;font-size:.95em;flex-shrink:0;margin-top:0}
+.list .card:hover .c-thumb{transform:scale(1.1) rotate(-5deg)}
+.list .c-info{flex:1;min-width:0;gap:.1em}
+.list .c-name{font-size:.88em;letter-spacing:-.2px}
+.list .c-meta-row{flex-wrap:nowrap;gap:.28em;overflow:hidden}
+.list .c-desc,.list .c-stars,.list .card-group-badge{display:none}
+.list .todo-prog{padding:.18em .6em;border-top:none;border-left:1px solid rgba(11,135,145,.07);flex-direction:column;gap:.12em;min-width:3.5em;flex-shrink:0;justify-content:center}
+/* show tags as compact chips row */
+.list .c-tags{
+  display:flex!important;flex-wrap:nowrap;gap:.18em;
+  overflow:hidden;padding-top:0;margin-top:.12em;max-width:200px}
+.list .c-tags .ctag{font-size:.51em;padding:.1em .34em;flex-shrink:0;white-space:nowrap}
+/* foot: meta info stacked on right */
+.list .cf-m{font-size:.57em;white-space:nowrap}
+.list .cf-m+.cf-m{margin-left:0}
+.list .cf-sp{display:none}
+.list .qas{
+  display:flex!important;opacity:1!important;transform:none!important;
+  gap:.18em;flex-direction:column}
+.list .qa-btn{font-size:.57em;padding:.22em .42em;justify-content:center}
+/* todo badge → reposition for list */
+.list .todo-badge{top:.55em;left:.55em;width:.48em;height:.48em}
+/* drag handle hidden in list (reorder doesn't apply) */
+.list .drag-h{display:none}
+/* hover: accent left glow only */
+.list .card:hover{
+  transform:none;
+  border-left-color:color-mix(in srgb,var(--c,var(--acc)) 88%,transparent);
+  background:linear-gradient(90deg,
+    color-mix(in srgb,var(--c,var(--acc)) 5%,#081519) 0%,
+    #040c10 30%);
+  box-shadow:
+    inset 4px 0 0 color-mix(in srgb,var(--c,var(--acc)) 80%,transparent),
+    0 3px 18px rgba(0,0,0,.28)}
 
-.empty{text-align:center;padding:70px 20px;color:var(--txt3)}
-.empty i{font-size:2.2em;display:block;margin-bottom:12px;opacity:.2}
-.empty p{font-family:var(--mono);font-size:.78em}
+.empty{
+  text-align:center;padding:56px 20px;color:var(--txt3)}
+.empty i{
+  font-size:2.6em;display:block;margin-bottom:14px;
+  opacity:.12;filter:blur(.5px)}
+.empty p{font-family:var(--mono);font-size:.76em;line-height:1.8}
+.empty strong{color:var(--txt2)}
 
 /* ── Grid section container ────────────────────────────── */
-.grid-section{
-  background:rgba(3,9,12,.62);
-  border:1px solid rgba(11,135,145,.07);
-  border-radius:20px;
-  padding:18px;
-  margin-bottom:22px;
-  box-shadow:0 4px 32px rgba(0,0,0,.28),inset 0 1px 0 rgba(11,135,145,.06)
+@keyframes sectionIn{
+  0%{opacity:0;transform:translateY(16px);filter:blur(3px)}
+  100%{opacity:1;transform:translateY(0);filter:blur(0)}
 }
+.grid-section{
+  background:linear-gradient(160deg,rgba(3,10,14,.75) 0%,rgba(2,7,11,.82) 100%);
+  border:1px solid rgba(11,135,145,.08);
+  border-top:1px solid rgba(11,135,145,.13);
+  border-radius:18px;
+  padding:18px 18px 20px;
+  margin-bottom:18px;
+  box-shadow:
+    0 6px 40px rgba(0,0,0,.32),
+    inset 0 1px 0 rgba(11,135,145,.07),
+    inset 0 0 0 1px rgba(255,255,255,.013);
+  transition:box-shadow .3s,border-color .3s,transform .3s;
+  animation:sectionIn .5s cubic-bezier(.34,1.2,.64,1) both
+}
+.grid-section:nth-child(1){animation-delay:.04s}
+.grid-section:nth-child(2){animation-delay:.1s}
+.grid-section:nth-child(3){animation-delay:.16s}
+.grid-section:nth-child(4){animation-delay:.22s}
+.grid-section:nth-child(5){animation-delay:.28s}
+.grid-section:hover{
+  box-shadow:0 12px 56px rgba(0,0,0,.46),0 0 0 1px rgba(124,140,255,.1),inset 0 1px 0 rgba(11,135,145,.14);
+  border-color:rgba(124,140,255,.14)
+}
+
+/* ── sec-head improvements ─────────────────────────────── */
+.sec-head{
+  font-family:var(--mono);font-size:.57em;font-weight:700;color:var(--txt3);
+  letter-spacing:1.6px;text-transform:uppercase;
+  margin-bottom:13px;display:flex;align-items:center;gap:7px;
+  padding-bottom:10px;border-bottom:1px solid rgba(11,135,145,.08)}
+.sec-head i{font-size:1.05em;color:var(--acc2);opacity:.7;transition:opacity .2s,transform .3s}
+.sec-head:hover i{opacity:1;transform:scale(1.15) rotate(-6deg)}
+/* remove the old ::after line — border-bottom handles it now */
+.sec-head::after{display:none}
+
+/* group head override */
+.group-head{border-bottom:1px solid rgba(124,140,255,.1);transition:border-color .25s}
+.group-head::after{display:none}
+.group-head:hover{border-bottom-color:rgba(124,140,255,.22)}
+/* cuando está colapsado el grupo, atenuar el borde */
+.group-section.collapsed .group-head{border-bottom-color:transparent;margin-bottom:0;padding-bottom:0}
 
 /* ═══════════════════════════════════════════
    DETAIL PANEL
@@ -1192,6 +1508,14 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 .ctx-div{height:1px;background:var(--bdr);margin:3px 0}
 .ctx-danger:hover{background:rgba(248,113,113,.1);color:var(--red)}
 .ctx-danger:hover i{color:var(--red)}
+.ctx-has-sub{position:relative}
+.ctx-arrow{margin-left:auto!important;width:auto!important;font-size:.72em!important;opacity:.5}
+.ctx-sub{display:none;position:absolute;left:100%;top:-4px;background:var(--bg3);border:1px solid var(--bdr2);border-radius:10px;padding:4px;min-width:160px;box-shadow:var(--shadow);z-index:1010}
+.ctx-has-sub:hover .ctx-sub{display:block}
+.ctx-sub-item{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:6px;color:var(--txt2);font-size:.77em;cursor:pointer;transition:all .11s}
+.ctx-sub-item:hover{background:var(--acc3);color:var(--txt)}
+.ctx-sub-item i{width:12px;font-size:.84em;color:var(--txt3);flex-shrink:0}
+.ctx-sub-item:hover i{color:var(--acc2)}
 
 /* ═══════════════════════════════════════════
    TOAST
@@ -1213,6 +1537,119 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 /* Back link */
 .back-link{display:flex;align-items:center;gap:6px;color:var(--txt3);text-decoration:none;font-family:var(--mono);font-size:.7em;font-weight:500;transition:color .15s;padding:6px 9px;border-radius:7px;background:var(--glass);border:1px solid var(--bdr)}
 .back-link:hover{color:var(--txt)}
+
+/* ═══════════════════════════════════════════
+   GROUPS
+═══════════════════════════════════════════ */
+.group-section{
+  transition:box-shadow .3s,border-color .3s;
+  cursor:default
+}
+.group-section:not(.collapsed):hover{
+  border-color:rgba(124,140,255,.2);
+  box-shadow:0 8px 48px rgba(0,0,0,.38),0 0 0 1px rgba(124,140,255,.08),inset 0 1px 0 rgba(11,135,145,.1)
+}
+@keyframes sectionExpand{
+  0%{opacity:.7;transform:translateY(-4px)}
+  100%{opacity:1;transform:translateY(0)}
+}
+.group-section:not(.collapsed) .group-grid{animation:sectionExpand .35s cubic-bezier(.34,1.2,.64,1)}
+.group-section.collapsed .group-grid{animation:none}
+
+.group-head{
+  justify-content:flex-start!important;width:100%;
+  cursor:pointer;user-select:none;border-radius:8px;
+  padding:4px 6px;margin:-4px -6px;margin-bottom:9px;
+  transition:background .18s
+}
+.group-head:hover{background:var(--glass)}
+.group-badge{
+  font-family:var(--mono);font-size:.6em;font-weight:700;
+  background:var(--acc3);color:var(--acc2);border:1px solid rgba(124,140,255,.22);
+  padding:1px 7px;border-radius:20px;margin-left:6px;
+  transition:all .2s
+}
+.group-section.collapsed .group-badge{
+  background:rgba(124,140,255,.05);color:var(--txt3);border-color:var(--bdr)
+}
+.group-collapse-btn{
+  margin-left:auto;background:transparent;border:1px solid transparent;
+  color:var(--txt3);font-size:.8em;cursor:pointer;
+  padding:3px 7px;border-radius:6px;
+  transition:all .2s cubic-bezier(.34,1.56,.64,1);
+  display:flex;align-items:center;gap:5px;flex-shrink:0
+}
+.group-collapse-btn::before{
+  content:'ocultar';font-family:var(--mono);font-size:.78em;
+  color:var(--txt3);letter-spacing:.4px;transition:color .2s
+}
+.group-section.collapsed .group-collapse-btn::before{content:'mostrar';color:var(--acc2)}
+.group-collapse-btn:hover{
+  background:var(--glass2);border-color:var(--bdr2);
+  color:var(--acc2);transform:scale(1.06)
+}
+.group-collapse-btn:active{transform:scale(.94)}
+.group-collapse-btn i{transition:transform .38s cubic-bezier(.34,1.56,.64,1)}
+.group-section.collapsed .group-collapse-btn i{transform:rotate(180deg)}
+
+/* ── Group color dot & picker ── */
+.group-color-dot{transition:color .25s}
+.group-section{--gc:var(--acc2)}
+.group-section .group-color-dot{color:var(--gc)}
+.group-section .group-badge{border-color:color-mix(in srgb,var(--gc) 40%,transparent)}
+.group-color-pick{
+  display:flex;align-items:center;gap:.3em;
+  cursor:pointer;padding:3px 7px;border-radius:6px;border:1px solid transparent;
+  color:var(--txt3);font-size:.78em;transition:all .18s;flex-shrink:0
+}
+.group-color-pick:hover{background:var(--glass2);border-color:var(--bdr2);color:var(--acc2)}
+.group-color-inp{
+  width:16px;height:16px;border:none;background:none;padding:0;cursor:pointer;
+  border-radius:50%;overflow:hidden;opacity:0;position:absolute;inset:0;
+}
+.group-color-pick{position:relative}
+
+/* shimmer en group-head al expandir */
+@keyframes headShimmer{
+  0%{background-position:-200% center}
+  100%{background-position:200% center}
+}
+.group-section:not(.collapsed) .group-head .group-badge{
+  animation:headShimmer 2.2s linear infinite;
+  background:linear-gradient(90deg,var(--acc3) 25%,rgba(124,140,255,.22) 50%,var(--acc3) 75%);
+  background-size:200% auto
+}
+.group-grid{overflow:hidden;transition:max-height .42s cubic-bezier(.4,0,.2,1)}
+.group-section.collapsed .group-collapse-btn i{transform:rotate(180deg)}
+
+.group-quick-btn{
+  padding:3px 8px;border-radius:6px;font-family:var(--mono);font-size:.63em;
+  background:var(--glass);border:1px solid var(--bdr);color:var(--txt3);
+  transition:all .15s;cursor:pointer
+}
+.group-quick-btn:hover,.group-quick-btn.on{border-color:var(--acc2);color:var(--acc2);background:var(--acc3)}
+
+.nav-trash .cnt{background:rgba(255,61,90,.12)!important;color:var(--red)!important}
+
+/* ═══════════════════════════════════════════
+   TRASH SECTION
+═══════════════════════════════════════════ */
+.trash-list{display:flex;flex-direction:column;gap:7px}
+.trash-item{
+  display:flex;align-items:center;gap:13px;
+  padding:11px 14px;border-radius:10px;
+  background:rgba(255,61,90,.04);border:1px solid rgba(255,61,90,.1);
+  transition:all .18s
+}
+.trash-item:hover{border-color:rgba(255,61,90,.22);background:rgba(255,61,90,.07)}
+.trash-ico{
+  width:38px;height:38px;border-radius:9px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:1.1em
+}
+.trash-info{flex:1;min-width:0}
+.trash-name{font-weight:700;font-size:.88em;color:var(--txt);letter-spacing:-.2px}
+.trash-meta{font-family:var(--mono);font-size:.6em;color:var(--txt3);margin-top:2px}
+.trash-acts{display:flex;gap:5px;flex-shrink:0;flex-wrap:wrap}
 
 /* ═══════════════════════════════════════════
    MOBILE COMPONENTS
@@ -1251,15 +1688,52 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 .mob-nb.new-nb i{font-size:1.4em}
 
 /* ═══════════════════════════════════════════
-   RESPONSIVE — TABLET
+   RESPONSIVE — EXTRA LARGE (>1600px)
 ═══════════════════════════════════════════ */
-@media(min-width:821px) and (max-width:1100px){
-  :root{--sidebar:220px}
-  .grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+@media(min-width:1601px){
+  :root{--sidebar:290px}
+  .content{padding:28px 32px 72px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+  .grid-section{padding:22px;border-radius:22px;margin-bottom:22px}
+  .card-top{padding:1.1em 1.1em .8em}
+  .page-title{font-size:1.7em}
 }
 
 /* ═══════════════════════════════════════════
-   RESPONSIVE — MOBILE
+   RESPONSIVE — LARGE (1401–1600px)
+═══════════════════════════════════════════ */
+@media(min-width:1401px) and (max-width:1600px){
+  :root{--sidebar:272px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(295px,1fr))}
+  .content{padding:24px 26px 64px}
+}
+
+/* ═══════════════════════════════════════════
+   RESPONSIVE — MEDIUM-LARGE (1101–1400px)
+═══════════════════════════════════════════ */
+@media(min-width:1101px) and (max-width:1400px){
+  :root{--sidebar:248px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(265px,1fr))}
+  .content{padding:20px 22px 60px}
+}
+
+/* ═══════════════════════════════════════════
+   RESPONSIVE — TABLET (821–1100px)
+═══════════════════════════════════════════ */
+@media(min-width:821px) and (max-width:1100px){
+  :root{--sidebar:200px}
+  .content{padding:16px 16px 56px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:11px}
+  .grid-section{padding:14px;border-radius:15px}
+  .sidebar{padding:14px 10px;gap:16px}
+  .logo-name{font-size:1em}
+  .stat-val{font-size:1.2em}
+  /* hide topbar labels on narrow sidebar layout */
+  .sort-wrap .sort-item span{display:none}
+}
+
+/* ═══════════════════════════════════════════
+   RESPONSIVE — MOBILE (≤820px)
 ═══════════════════════════════════════════ */
 @media(max-width:820px){
   /* Layout */
@@ -1280,20 +1754,23 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 
   /* Topbar */
   .topbar{padding:8px 10px;gap:6px}
-  .search-wrap{max-width:none}
+  .search-wrap{max-width:none;flex:1}
   .view-toggle,.sort-wrap{display:none}
 
   /* Content — bottom padding for mobile nav */
-  .content{padding:12px 12px 72px}
+  .content{padding:12px 12px 78px}
 
   /* Grid */
-  .grid{grid-template-columns:1fr;gap:10px}
-  [data-csize="xs"] .grid:not(.list),
-  [data-csize="sm"] .grid:not(.list),
-  [data-csize="md"] .grid:not(.list),
-  [data-csize="lg"] .grid:not(.list),
-  [data-csize="xl"] .grid:not(.list){grid-template-columns:1fr!important;gap:10px!important}
-  .grid-section{padding:12px;border-radius:14px;margin-bottom:14px}
+  .grid{grid-template-columns:1fr;gap:9px}
+  /* compact stays 2-col on mobile */
+  .grid.compact{grid-template-columns:repeat(2,1fr)!important;gap:8px!important}
+  [data-csize="xs"] .grid:not(.list):not(.compact),
+  [data-csize="sm"] .grid:not(.list):not(.compact),
+  [data-csize="md"] .grid:not(.list):not(.compact),
+  [data-csize="lg"] .grid:not(.list):not(.compact),
+  [data-csize="xl"] .grid:not(.list):not(.compact){grid-template-columns:1fr!important;gap:9px!important}
+  .grid-section{padding:11px;border-radius:14px;margin-bottom:12px}
+  .sec-head{font-size:.52em;margin-bottom:10px}
 
   /* Cards — always show actions for touch */
   .card-acts{opacity:1!important;transform:none!important}
@@ -1301,10 +1778,19 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
   .ca-btn{width:2em;height:2em}
   .card:hover{transform:none}
 
+  /* List view on mobile — simplified */
+  .list .card-foot{display:none}
+  .list .card-acts{padding:.4em}
+  .list .c-tags{display:none!important}
+
+  /* Compact on mobile — tighter */
+  .compact .c-thumb{width:2.4em;height:2.4em}
+  .compact .c-name{font-size:.76em}
+
   /* Detail panel → bottom sheet */
   #dp{
     width:100%!important;right:0!important;left:0;
-    top:auto!important;bottom:-100vh;height:88vh;
+    top:auto!important;bottom:-100vh;height:90vh;
     border-left:none;border-top:1px solid var(--bdr2);
     border-radius:20px 20px 0 0;
     transition:bottom .38s cubic-bezier(.34,1.56,.64,1)!important
@@ -1316,9 +1802,31 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
   .sp-box{width:96vw}
 
   /* Typography */
-  .page-title{font-size:1.2em}
+  .page-title{font-size:1.18em}
   .page-sub{font-size:.62em}
   .logo-name{font-size:1em}
+  .page-head{margin-bottom:12px}
+}
+
+/* ═══════════════════════════════════════════
+   RESPONSIVE — SMALL MOBILE (≤480px)
+═══════════════════════════════════════════ */
+@media(max-width:480px){
+  .topbar{padding:6px 8px;gap:5px}
+  .content{padding:9px 9px 76px}
+  .grid{gap:8px}
+  .grid-section{padding:9px;border-radius:12px;margin-bottom:9px}
+  .card-top{padding:.85em .85em .55em}
+  .card-foot{padding:.38em .85em}
+  .c-thumb{width:2.4em;height:2.4em}
+  /* compact: 2 equal cols */
+  .grid.compact{grid-template-columns:repeat(2,1fr)!important;gap:7px!important}
+  .page-title{font-size:1.05em}
+  /* bulk bar wraps tighter */
+  .bulk-bar{flex-wrap:wrap;padding:6px 9px;gap:5px}
+  /* trash items stack on tiny screens */
+  .trash-item{flex-wrap:wrap}
+  .trash-acts{width:100%;justify-content:flex-end;margin-top:6px}
 }
 </style>
 </head>
@@ -1331,18 +1839,18 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
   <div class="logo">
     <div class="logo-mark"><i class="fas fa-code"></i></div>
     <div>
-      <div class="logo-name">Code<span>Hub</span></div>
+      <div class="logo-name">Code<span>Hub</span> <span class="logo-ver">v<?=CH_VERSION?></span></div>
       <div class="logo-env">localhost · PHP <?=PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION?></div>
     </div>
   </div>
 
   <div>
     <div class="stats-grid">
-      <div class="stat-cell"><div class="stat-val"><?=$total?></div><div class="stat-lbl">Projects</div></div>
-      <div class="stat-cell accent"><div class="stat-val"><?=$pinned?></div><div class="stat-lbl">Pinned</div></div>
-      <div class="stat-cell"><div class="stat-val"><?=$recent?></div><div class="stat-lbl">New</div></div>
+      <div class="stat-cell"><div class="stat-val" id="stat-total"><?=$total?></div><div class="stat-lbl">Projects</div></div>
+      <div class="stat-cell accent"><div class="stat-val" id="stat-pinned"><?=$pinned?></div><div class="stat-lbl">Pinned</div></div>
+      <div class="stat-cell"><div class="stat-val" id="stat-recent"><?=$recent?></div><div class="stat-lbl">New</div></div>
       <div class="stat-cell <?=$pending>0?'accent':''?>">
-        <div class="stat-val" <?=$pending>0?'style="color:var(--warm2)"':''?>><?=$pending?></div>
+        <div class="stat-val" id="stat-todos" <?=$pending>0?'style="color:var(--warm2)"':''?>><?=$pending?></div>
         <div class="stat-lbl">Todos</div>
       </div>
     </div>
@@ -1355,6 +1863,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
       <li class="nav-item" data-f="pin"><i class="fas fa-thumbtack"></i>Pinned<span class="cnt"><?=$pinned?></span></li>
       <li class="nav-item" data-f="recent"><i class="fas fa-clock"></i>Recent<span class="cnt"><?=$recent?></span></li>
       <li class="nav-item" data-f="notes"><i class="fas fa-sticky-note"></i>Has Notes<span class="cnt"><?=$hasNotes?></span></li>
+      <li class="nav-item nav-trash" data-f="trash"><i class="fas fa-trash-alt" style="color:var(--red)"></i>Trash<span class="cnt"><?=$trashCount?></span></li>
     </ul>
   </div>
 
@@ -1367,6 +1876,20 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
     <ul class="nav">
       <?php foreach($visibleSt as $k=>[$col,$icon,$lbl]):$cnt=$stCounts[$k]??0;?>
       <li class="nav-item" data-f="st-<?=$k?>"><i class="fas fa-<?=$icon?>" style="color:var(--<?=$col?>)!important"></i><?=$lbl?><span class="cnt"><?=$cnt?></span></li>
+      <?php endforeach;?>
+    </ul>
+  </div>
+  <?php endif;?>
+
+  <?php if(!empty($allGroupNames)):?>
+  <div>
+    <div class="s-label">Groups</div>
+    <ul class="nav">
+      <li class="nav-item" data-f="all"><i class="fas fa-border-all"></i>Todos<span class="cnt"><?=$total?></span></li>
+      <?php foreach($allGroupNames as $gName):$gCnt=count($groupedProjects[$gName]);?>
+      <li class="nav-item" data-f="group-<?=e(strtolower($gName))?>">
+        <i class="fas fa-layer-group" style="color:var(--acc2)"></i><?=e($gName)?><span class="cnt"><?=$gCnt?></span>
+      </li>
       <?php endforeach;?>
     </ul>
   </div>
@@ -1472,6 +1995,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
         <button class="btn btn-ghost" style="font-size:.68em;padding:4px 8px" onclick="doBulk('pin')"><i class="fas fa-thumbtack"></i>Pin</button>
         <button class="btn btn-ghost" style="font-size:.68em;padding:4px 8px" onclick="doBulk('done')"><i class="fas fa-check"></i>Done</button>
         <button class="btn btn-ghost" style="font-size:.68em;padding:4px 8px" onclick="doBulk('archive')"><i class="fas fa-archive"></i>Archive</button>
+        <button class="btn btn-ghost" style="font-size:.68em;padding:4px 8px" onclick="doBulkGroup()"><i class="fas fa-layer-group"></i>Grupo</button>
         <button class="btn btn-danger" style="font-size:.68em;padding:4px 8px" onclick="doBulk('delete')"><i class="fas fa-trash"></i>Delete</button>
         <button class="btn btn-ghost" style="font-size:.68em;padding:4px 8px;width:28px" onclick="clearBulk()"><i class="fas fa-times"></i></button>
       </div>
@@ -1479,7 +2003,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 
     <?php $pinnedProjs=array_filter($projects,fn($p)=>$p['pin']);?>
     <?php if(!empty($pinnedProjs)):?>
-    <div class="grid-section" id="sec-pinned">
+    <div class="grid-section" id="sec-pinned" data-proj-section>
       <div class="sec-head"><i class="fas fa-thumbtack" style="color:var(--ylw)"></i>Pinned</div>
       <div class="grid" id="grid-pinned">
         <?php foreach($pinnedProjs as $p) echo renderCard($p);?>
@@ -1487,15 +2011,82 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
     </div>
     <?php endif;?>
 
-    <div class="grid-section">
-      <div class="sec-head"><i class="fas fa-folder-open"></i>All Projects</div>
+    <?php /* ── Group sections ──────────────────────────── */ ?>
+    <?php foreach($groupedProjects as $gName => $gProjs): $gSlug=preg_replace('/[^a-z0-9]/','_',strtolower($gName)); ?>
+    <div class="grid-section group-section" data-proj-section data-group-name="<?=e(strtolower($gName))?>">
+      <div class="sec-head group-head" onclick="toggleGroupSection(this.querySelector('.group-collapse-btn'))">
+        <i class="fas fa-layer-group group-color-dot"></i>
+        <?=e($gName)?>
+        <span class="group-badge"><?=count($gProjs)?></span>
+        <label class="group-color-pick" title="Color del grupo" onclick="event.stopPropagation()">
+          <i class="fas fa-palette"></i>
+          <input type="color" class="group-color-inp" data-gname="<?=e(strtolower($gName))?>" oninput="setGroupColor('<?=e(strtolower($gName))?>',this.value)" onclick="event.stopPropagation()">
+        </label>
+        <button class="group-collapse-btn" title="Ocultar/Mostrar" onclick="event.stopPropagation();toggleGroupSection(this)"><i class="fas fa-chevron-up"></i></button>
+      </div>
+      <div class="grid group-grid" id="grid-group-<?=$gSlug?>">
+        <?php foreach($gProjs as $p) echo renderCard($p);?>
+      </div>
+    </div>
+    <?php endforeach; ?>
+
+    <?php /* ── Ungrouped / All projects ──────────────── */ ?>
+    <?php if(!empty($ungroupedProjects) || empty($allGroupNames)): ?>
+    <div class="grid-section" data-proj-section id="sec-all">
+      <div class="sec-head"><i class="fas fa-folder-open"></i><?= !empty($allGroupNames) ? 'Sin grupo' : 'All Projects' ?></div>
       <div class="grid" id="main-grid">
-        <?php foreach($projects as $p) echo renderCard($p);?>
+        <?php foreach($ungroupedProjects as $p) echo renderCard($p);?>
       </div>
       <?php if(!$total):?>
       <div class="empty">
         <i class="fas fa-folder-open"></i>
         <p>No projects yet — click <strong>New</strong> to create one!</p>
+      </div>
+      <?php endif;?>
+    </div>
+    <?php endif; /* end ungrouped section */ ?>
+
+    <!-- ── No-results empty state ── -->
+    <div id="no-results" style="display:none">
+      <div class="empty">
+        <i class="fas fa-search" style="color:var(--txt3)"></i>
+        <p>No projects match your search.</p>
+        <button class="btn btn-ghost" style="margin-top:.8em;font-size:.75em" onclick="srch.value='';filterCards()"><i class="fas fa-times"></i> Clear search</button>
+      </div>
+    </div>
+
+    <?php /* ── Trash section ─────────────────────────── */ ?>
+    <div class="grid-section trash-section" id="sec-trash" style="display:none">
+      <div class="sec-head" style="color:var(--red)">
+        <i class="fas fa-trash-alt"></i>Trash
+        <span class="group-badge" style="background:rgba(255,61,90,.15);color:var(--red);border-color:rgba(255,61,90,.3)"><?=$trashCount?></span>
+        <?php if($trashCount>0):?>
+        <button class="btn btn-danger" style="font-size:.62em;padding:3px 9px;margin-left:auto" onclick="emptyTrash()"><i class="fas fa-fire"></i>Empty All</button>
+        <?php endif;?>
+      </div>
+      <?php if(empty($trashItems)):?>
+      <div class="empty"><i class="fas fa-trash"></i><p>Trash is empty</p></div>
+      <?php else:?>
+      <div class="trash-list">
+        <?php foreach($trashItems as $ti):
+          $rgb='130,140,255';
+          if(preg_match('/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i',$ti['col'],$m))
+            $rgb=hexdec($m[1]).','.hexdec($m[2]).','.hexdec($m[3]);
+        ?>
+        <div class="trash-item" data-trash-name="<?=e($ti['name'])?>">
+          <div class="trash-ico" style="background:rgba(<?=$rgb?>,.12)">
+            <i class="fas <?=$ti['ico']?>" style="color:<?=$ti['col']?>"></i>
+          </div>
+          <div class="trash-info">
+            <div class="trash-name"><?=e($ti['origName'])?></div>
+            <div class="trash-meta"><?=$ti['tipo']?> · <?=$ti['files']?> files · deleted <?=$ti['ago']?></div>
+          </div>
+          <div class="trash-acts">
+            <button class="btn btn-ghost" style="font-size:.68em;padding:5px 9px" onclick="restoreProj('<?=e($ti['name'])?>')" title="Restore"><i class="fas fa-undo"></i>Restore</button>
+            <button class="btn btn-danger" style="font-size:.68em;padding:5px 9px" onclick="permDel('<?=e($ti['name'])?>')" title="Delete permanently"><i class="fas fa-times"></i>Delete Forever</button>
+          </div>
+        </div>
+        <?php endforeach;?>
       </div>
       <?php endif;?>
     </div>
@@ -1622,6 +2213,21 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
     <form id="f-cust">
       <input type="hidden" id="c-dir">
       <div class="field"><label>Description</label><textarea id="c-desc" placeholder="What does this project do?"></textarea></div>
+      <div class="field">
+        <label>Group / Category</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="c-group" placeholder="e.g. Work, Personal, Learning…" list="group-suggestions" style="flex:1">
+          <datalist id="group-suggestions">
+            <?php foreach($allGroupNames as $gn):?><option value="<?=e($gn)?>">
+            <?php endforeach;?>
+          </datalist>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px" id="group-quick-btns">
+          <?php foreach($allGroupNames as $gn):?>
+          <button type="button" class="group-quick-btn" onclick="pickGroup('<?=e($gn)?>')"><?=e($gn)?></button>
+          <?php endforeach;?>
+        </div>
+      </div>
       <div class="field"><label>Status</label>
         <select id="c-st">
           <option value="active">🟢 Active</option>
@@ -1632,11 +2238,6 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
         </select>
       </div>
       <div class="field"><label>Custom URL / Port</label><input id="c-url" placeholder="http://localhost:3000"></div>
-      <div class="field"><label>Rating</label>
-        <div class="r-row" id="r-row">
-          <?php for($i=1;$i<=5;$i++):?><i class="fas fa-star r-star" data-v="<?=$i?>"></i><?php endfor;?>
-        </div>
-      </div>
       <div class="field"><label>Tags</label>
         <div class="tag-wrap" id="tag-wrap"><input class="tag-field" id="tag-fld" placeholder="add tag + Enter"></div>
       </div>
@@ -1664,6 +2265,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
       <div class="stab on" data-tab="themes" onclick="switchTab(this,'themes')"><i class="fas fa-swatchbook"></i>Themes</div>
       <div class="stab" data-tab="appearance" onclick="switchTab(this,'appearance')"><i class="fas fa-palette"></i>Style</div>
       <div class="stab" data-tab="layout" onclick="switchTab(this,'layout')"><i class="fas fa-th-large"></i>Layout</div>
+      <div class="stab" data-tab="cards" onclick="switchTab(this,'cards')"><i class="fas fa-id-card"></i>Cards</div>
       <div class="stab" data-tab="effects" onclick="switchTab(this,'effects')"><i class="fas fa-magic"></i>Effects</div>
     </div>
 
@@ -1673,7 +2275,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
         <div class="srow-title" style="margin-bottom:3px"><i class="fas fa-swatchbook"></i>Theme</div>
         <div class="srow-desc">Click any theme to apply instantly.</div>
         <div class="tpv-grid">
-          <?php $themeData=['dark'=>['#07080f','#6d7fff'],'midnight'=>['#000','#00d4ff'],'forest'=>['#040a06','#4ade80'],'rose'=>['#0c0409','#fb7185'],'dusk'=>['#0c0618','#a78bfa'],'ocean'=>['#010d10','#2dd4bf'],'dracula'=>['#0f0f1a','#bd93f9'],'amber'=>['#0a0602','#fcd34d'],'neon'=>['#010102','#39ff14'],'nord'=>['#181c28','#88c0d0']];
+          <?php $themeData=['dark'=>['#010608','#00e8f8'],'midnight'=>['#02020d','#818cf8'],'forest'=>['#020804','#34d399'],'rose'=>['#080308','#f9a8d4'],'dusk'=>['#050212','#c4b5fd'],'ocean'=>['#010810','#2dd4bf'],'dracula'=>['#0c0a18','#d6b8fe'],'amber'=>['#080502','#fbbf24'],'neon'=>['#060208','#ec4899'],'nord'=>['#0c1018','#88c0d0']];
           foreach($themeData as $tn=>[$bg,$ac]):?>
           <div class="tpv" data-t="<?=$tn?>" onclick="applyTheme('<?=$tn?>')">
             <div class="tpv-inner" style="background:<?=$bg?>">
@@ -1800,6 +2402,34 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
     </div>
 
     <!-- Effects tab -->
+    <!-- Cards tab -->
+    <div class="spanel" id="tab-cards">
+      <div class="srow">
+        <div class="srow-l"><div class="srow-title"><i class="fas fa-layer-group"></i>Mostrar grupo en card</div><div class="srow-desc">Badge con el nombre del grupo debajo de los tags</div></div>
+        <label class="toggle-wrap"><input class="toggle-inp" type="checkbox" id="card-group-tog" checked onchange="applyCardGroup(this.checked)"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="srow">
+        <div class="srow-l"><div class="srow-title"><i class="fas fa-tasks"></i>Progreso de Todos</div><div class="srow-desc">Barra de progreso de tareas completadas</div></div>
+        <label class="toggle-wrap"><input class="toggle-inp" type="checkbox" id="card-todos-tog" checked onchange="applyCardTodos(this.checked)"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="srow">
+        <div class="srow-l"><div class="srow-title"><i class="fas fa-eye"></i>Contador de aperturas</div><div class="srow-desc">Número de veces que abriste el proyecto</div></div>
+        <label class="toggle-wrap"><input class="toggle-inp" type="checkbox" id="card-opens-tog" checked onchange="applyCardOpens(this.checked)"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="srow">
+        <div class="srow-l"><div class="srow-title"><i class="fas fa-link"></i>Indicador de URL</div><div class="srow-desc">Icono en el footer si el proyecto tiene URL configurada</div></div>
+        <label class="toggle-wrap"><input class="toggle-inp" type="checkbox" id="card-url-tog" checked onchange="applyCardUrl(this.checked)"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="srow">
+        <div class="srow-l"><div class="srow-title"><i class="fas fa-align-left"></i>Descripción</div><div class="srow-desc">Texto descriptivo debajo del nombre</div></div>
+        <label class="toggle-wrap"><input class="toggle-inp" type="checkbox" id="card-desc-tog" checked onchange="applyCardDesc(this.checked)"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="srow">
+        <div class="srow-l"><div class="srow-title"><i class="fas fa-tags"></i>Tags / Stack</div><div class="srow-desc">Lenguaje y frameworks del proyecto</div></div>
+        <label class="toggle-wrap"><input class="toggle-inp" type="checkbox" id="card-tags-tog" checked onchange="applyCardTags(this.checked)"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+
     <div class="spanel" id="tab-effects">
       <div class="srow">
         <div class="srow-l"><div class="srow-title"><i class="fas fa-film"></i>Card Animations</div><div class="srow-desc">Fade-in slide when cards appear</div></div>
@@ -1829,7 +2459,7 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 
     <div class="dash-save-bar">
       <i class="fas fa-bolt"></i>
-      <span>All changes apply <strong>instantly</strong> and are saved in your browser.</span>
+      <span>Changes apply <strong>instantly</strong> and se guardan en <strong>.codehub/prefs.json</strong></span>
       <button class="btn btn-ghost" style="font-size:.68em;padding:4px 9px;flex-shrink:0" onclick="resetDashSettings()"><i class="fas fa-undo"></i> Reset</button>
     </div>
   </div>
@@ -1853,6 +2483,10 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
   <div class="ctx-item" id="ctx-cpath"><i class="fas fa-copy"></i>Copy Path</div>
   <div class="ctx-item" id="ctx-curl"><i class="fas fa-link"></i>Copy URL</div>
   <div class="ctx-div"></div>
+  <div class="ctx-item ctx-has-sub" id="ctx-group"><i class="fas fa-layer-group"></i>Mover a grupo<i class="fas fa-chevron-right ctx-arrow"></i>
+    <div class="ctx-sub" id="ctx-group-sub"></div>
+  </div>
+  <div class="ctx-div"></div>
   <div class="ctx-item ctx-danger" id="ctx-del"><i class="fas fa-trash"></i>Move to Trash</div>
 </div>
 
@@ -1863,8 +2497,39 @@ canvas#cv{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.15}
 /* ═══════════════════════════════════════════════════════
    DATA & CONFIG
 ═══════════════════════════════════════════════════════ */
-const PROJECTS = <?=json_encode(array_values($projects),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)?>;
+const PROJECTS  = <?=json_encode(array_values($projects),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)?>;
 const BASE_PATH = <?=json_encode($baseDirNorm)?>;
+
+/* ═══════════════════════════════════════════════════════
+   PREFS — preferencias guardadas en servidor (.codehub_prefs.json)
+   Todas las vistas, tema, orden, ajustes → se guardan aquí,
+   no en localStorage, así funcionan en cualquier navegador.
+═══════════════════════════════════════════════════════ */
+const Prefs=(()=>{
+  // IMPORTANTE: forzar objeto ({}) aunque PHP devuelva array vacío ([])
+  let _c=Object.assign({},<?=json_encode($prefs ?: new stdClass(),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)?>);
+  let _t=null;
+  let _dirty=false;
+  function _send(){
+    const fd=new FormData();
+    fd.append('data',JSON.stringify(_c));
+    fetch('?a=prefs',{method:'POST',body:fd}).catch(()=>{});
+    _dirty=false;
+  }
+  function _flush(){
+    _dirty=true;
+    clearTimeout(_t);
+    _t=setTimeout(_send,300);
+  }
+  // Guardar inmediatamente si la página se cierra/recarga antes del timeout
+  window.addEventListener('pagehide',()=>{ if(_dirty){ clearTimeout(_t); navigator.sendBeacon('?a=prefs', new URLSearchParams({data:JSON.stringify(_c)})); }});
+  return{
+    get(k,d=null){const v=_c[k];return v===undefined?d:v;},
+    set(k,v){_c[k]=v;_flush();},
+    del(k){delete _c[k];_flush();},
+    reset(keys){keys.forEach(k=>delete _c[k]);_flush();}
+  };
+})();
 
 /* ═══════════════════════════════════════════════════════
    PARTICLE CANVAS
@@ -1897,7 +2562,7 @@ const BASE_PATH = <?=json_encode($baseDirNorm)?>;
    TOAST
 ═══════════════════════════════════════════════════════ */
 let _tt;
-function toast(msg,type='ok'){
+function toast(msg,type='ok',dur=3000){
   const el=document.getElementById('toast');
   const ic=el.querySelector('i');
   document.getElementById('toast-msg').textContent=msg;
@@ -1905,13 +2570,13 @@ function toast(msg,type='ok'){
   ic.className=type==='ok'?'fas fa-check-circle':type==='err'?'fas fa-times-circle':'fas fa-info-circle';
   el.classList.add('show');
   clearTimeout(_tt);
-  _tt=setTimeout(()=>el.classList.remove('show'),3000);
+  _tt=setTimeout(()=>el.classList.remove('show'),dur);
 }
 
 /* ═══════════════════════════════════════════════════════
    THEME
 ═══════════════════════════════════════════════════════ */
-const _initT=localStorage.getItem('ch_theme')||'dark';
+const _initT=Prefs.get('theme','dark');
 document.documentElement.setAttribute('data-theme',_initT);
 document.querySelectorAll('.theme-dot').forEach(d=>{
   d.classList.toggle('on',d.getAttribute('data-t')===_initT);
@@ -1999,14 +2664,45 @@ async function delProj(dir){
   const d=await api('del',{d:dir});
   if(d.ok){
     toast('Moved to trash','ok');
-    // Remove card from DOM immediately
     document.querySelectorAll(`.card[data-name="${CSS.escape(dir)}"]`).forEach(c=>c.remove());
-    // Reload after short delay
     setTimeout(()=>location.reload(),800);
   }else{
     toast('Error: '+(d.m||'Could not delete'),'err');
     console.error('Delete failed:',d);
   }
+}
+
+async function permDel(trashName){
+  if(!confirm(`Delete permanently? This cannot be undone.`)) return;
+  toast('Deleting permanently…','info');
+  const d=await api('perm_del',{d:trashName});
+  if(d.ok){
+    toast('Deleted permanently','ok');
+    document.querySelector(`.trash-item[data-trash-name="${CSS.escape(trashName)}"]`)?.remove();
+    setTimeout(()=>location.reload(),700);
+  }else toast('Error: '+(d.m||'Failed'),'err');
+}
+
+async function restoreProj(trashName){
+  toast('Restoring…','info');
+  const d=await api('restore',{d:trashName});
+  if(d.ok){
+    toast('Restored!','ok');
+    document.querySelector(`.trash-item[data-trash-name="${CSS.escape(trashName)}"]`)?.remove();
+    setTimeout(()=>location.reload(),700);
+  }else toast('Error: '+(d.m||'Failed'),'err');
+}
+
+async function emptyTrash(){
+  if(!confirm('Empty ALL trash permanently? This cannot be undone!')) return;
+  const items=document.querySelectorAll('.trash-item[data-trash-name]');
+  let ok=0;
+  for(const el of items){
+    const r=await api('perm_del',{d:el.dataset.trashName});
+    if(r.ok){el.remove();ok++;}
+  }
+  toast(`Emptied ${ok} item(s)!`,'ok');
+  setTimeout(()=>location.reload(),700);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -2078,12 +2774,6 @@ function buildCustGrids(){
   });
 }
 
-document.querySelectorAll('.r-star').forEach(s=>{
-  s.addEventListener('click',()=>{sRate=+s.dataset.v;updStars();});
-  s.addEventListener('mouseover',()=>{const v=+s.dataset.v;document.querySelectorAll('.r-star').forEach((x,i)=>x.classList.toggle('on',i<v));});
-  s.addEventListener('mouseout',updStars);
-});
-function updStars(){document.querySelectorAll('.r-star').forEach((s,i)=>s.classList.toggle('on',i<sRate));}
 
 function renderTagInput(){
   document.querySelectorAll('.tw-tag').forEach(t=>t.remove());
@@ -2125,9 +2815,13 @@ function openCust(dir,ev){
   document.getElementById('c-desc').value=p.desc||'';
   document.getElementById('c-url').value=p.url||'';
   document.getElementById('c-st').value=p.st||'active';
-  sCol=p.col||'#7c8cff';sIco=p.ico||'fa-folder';sRate=p.rate||0;
+  const cgInp=document.getElementById('c-group');
+  if(cgInp) cgInp.value=p.group||'';
+  // Highlight current group quick button
+  document.querySelectorAll('.group-quick-btn').forEach(b=>b.classList.toggle('on',b.textContent.trim()===(p.group||'')));
+  sCol=p.col||'#7c8cff';sIco=p.ico||'fa-folder';
   sTags=[...(p.tags||[])];sImg=null;
-  renderTagInput();updStars();
+  renderTagInput();
   const uz=document.getElementById('up-zone');
   if(p.img){
     uz.innerHTML=`<img src="${p.img}"><input type="file" id="img-fld" accept="image/*" style="display:none">`;
@@ -2151,7 +2845,7 @@ document.getElementById('f-cust').addEventListener('submit',async e=>{
       if(d.ok) imgUrl=d.img;
     }catch(e){console.error('Image upload failed',e);}
   }
-  const payload={d:dir,ico:sIco,col:sCol,desc:document.getElementById('c-desc').value,st:document.getElementById('c-st').value,url:document.getElementById('c-url').value,rate:sRate,tags:JSON.stringify(sTags)};
+  const payload={d:dir,ico:sIco,col:sCol,desc:document.getElementById('c-desc').value,st:document.getElementById('c-st').value,url:document.getElementById('c-url').value,rate:sRate,tags:JSON.stringify(sTags),group:(document.getElementById('c-group')?.value||'').trim()};
   if(imgUrl) payload.img=imgUrl;
   const d=await api('cfg',payload);
   toast(d.ok?'Saved!':'Error','ok');
@@ -2266,6 +2960,48 @@ function renderTodos(todos,dir){
     ?todos.map((t,i)=>`<div class="todo-item${t.done?' done':''}" onclick="toggleTodo('${dir}',${i})"><div class="todo-cb">${t.done?'<i class="fas fa-check" style="font-size:.55em"></i>':''}</div><div class="todo-t">${t.text}</div><div class="todo-del" onclick="event.stopPropagation();delTodo('${dir}',${i})"><i class="fas fa-times"></i></div></div>`).join('')
     :'<p style="font-family:var(--mono);font-size:.68em;color:var(--txt3);padding:7px 0">No tasks yet</p>';
 }
+
+function updateCardTodoProgress(dir){
+  const p=PROJECTS.find(x=>x.name===dir);
+  if(!p) return;
+  const todos=p.todos||[];
+  const total=todos.length;
+  const done=todos.filter(t=>t.done).length;
+  const pend=total-done;
+  const pct=total>0?Math.round(done/total*100):0;
+
+  document.querySelectorAll(`.card[data-name="${CSS.escape(dir)}"]`).forEach(card=>{
+    // — barra de progreso —
+    let prog=card.querySelector('.todo-prog');
+    if(total===0){
+      prog?.remove();
+    } else {
+      if(!prog){
+        prog=document.createElement('div');
+        prog.className='todo-prog';
+        prog.innerHTML=`<div class="tp-bar"><div class="tp-fill" style="--c:${p.col||'#7c8cff'}"></div></div><span class="tp-lbl"></span>`;
+        const foot=card.querySelector('.card-foot');
+        foot ? card.insertBefore(prog,foot) : card.appendChild(prog);
+      }
+      const fill=prog.querySelector('.tp-fill');
+      const lbl=prog.querySelector('.tp-lbl');
+      if(fill) fill.style.width=pct+'%';
+      if(lbl)  lbl.textContent=`${done}/${total}`;
+      prog.title=`${done}/${total} tareas completadas`;
+    }
+
+    // — punto rojo de pending —
+    let badge=card.querySelector('.todo-badge');
+    if(pend>0 && !badge){
+      badge=document.createElement('div');
+      badge.className='todo-badge';
+      card.appendChild(badge);
+    } else if(pend===0 && badge){
+      badge.remove();
+    }
+  });
+  updateSidebarStats();
+}
 async function saveTodos(dir){
   const p=PROJECTS.find(x=>x.name===dir);
   if(!p)return;
@@ -2277,15 +3013,23 @@ function addTodo(dir){
   const p=PROJECTS.find(x=>x.name===dir);if(!p)return;
   if(!p.todos)p.todos=[];
   p.todos.push({text:txt,done:false});
-  renderTodos(p.todos,dir);inp.value='';saveTodos(dir);
+  renderTodos(p.todos,dir);
+  updateCardTodoProgress(dir);
+  inp.value='';saveTodos(dir);
 }
 function toggleTodo(dir,i){
   const p=PROJECTS.find(x=>x.name===dir);if(!p)return;
-  p.todos[i].done=!p.todos[i].done;renderTodos(p.todos,dir);saveTodos(dir);
+  p.todos[i].done=!p.todos[i].done;
+  renderTodos(p.todos,dir);
+  updateCardTodoProgress(dir);
+  saveTodos(dir);
 }
 function delTodo(dir,i){
   const p=PROJECTS.find(x=>x.name===dir);if(!p)return;
-  p.todos.splice(i,1);renderTodos(p.todos,dir);saveTodos(dir);
+  p.todos.splice(i,1);
+  renderTodos(p.todos,dir);
+  updateCardTodoProgress(dir);
+  saveTodos(dir);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -2296,10 +3040,83 @@ const srch=document.getElementById('srch');
 srch.addEventListener('input',filterCards);
 document.querySelectorAll('.nav-item[data-f]').forEach(el=>{
   el.addEventListener('click',()=>{
-    document.querySelectorAll('.nav-item[data-f]').forEach(x=>x.classList.remove('on'));
-    el.classList.add('on');filt=el.getAttribute('data-f');filterCards();
+    const f=el.getAttribute('data-f');
+    document.querySelectorAll('.nav-item[data-f]').forEach(x=>x.classList.toggle('on',x.getAttribute('data-f')===f));
+    filt=f;filterCards();
   });
 });
+
+/* ── persistencia de grupos colapsados ── */
+function _saveGroupStates(){
+  const collapsed=[...document.querySelectorAll('.group-section.collapsed')]
+    .map(s=>s.dataset.groupName).filter(Boolean);
+  Prefs.set('groups_collapsed',collapsed);
+}
+function _restoreGroupStates(){
+  const saved=Prefs.get('groups_collapsed',[]);
+  saved.forEach(name=>{
+    const sec=document.querySelector(`.group-section[data-group-name="${name}"]`);
+    if(!sec)return;
+    const grid=sec.querySelector('.group-grid');
+    if(!grid)return;
+    sec.classList.add('collapsed');
+    grid.style.maxHeight='0px';
+  });
+}
+_restoreGroupStates();
+
+/* ── Group colors ── */
+function setGroupColor(gname,color){
+  const sec=document.querySelector(`.group-section[data-group-name="${gname}"]`);
+  if(sec) sec.style.setProperty('--gc',color);
+  Prefs.set('group_color_'+gname,color);
+}
+function _restoreGroupColors(){
+  document.querySelectorAll('.group-section[data-group-name]').forEach(sec=>{
+    const gname=sec.dataset.groupName;
+    const col=Prefs.get('group_color_'+gname,null);
+    if(col){
+      sec.style.setProperty('--gc',col);
+      const inp=sec.querySelector('.group-color-inp');
+      if(inp)inp.value=col;
+    }
+  });
+}
+_restoreGroupColors();
+
+function toggleGroupSection(btn){
+  const sec=btn.closest('.group-section');
+  if(!sec) return;
+  const grid=sec.querySelector('.group-grid');
+  if(!grid) return;
+  const isCollapsing=!sec.classList.contains('collapsed');
+  if(isCollapsing){
+    grid.style.maxHeight=grid.scrollHeight+'px';
+    grid.getBoundingClientRect();
+    grid.style.maxHeight='0px';
+    sec.classList.add('collapsed');
+  } else {
+    sec.classList.remove('collapsed');
+    grid.style.maxHeight='0px';
+    grid.getBoundingClientRect();
+    grid.style.maxHeight=grid.scrollHeight+'px';
+    grid.querySelectorAll('.card').forEach((c,i)=>{
+      c.style.animation='none';
+      c.getBoundingClientRect();
+      c.style.animation='';
+      c.style.animationDelay=(i*.04)+'s';
+    });
+    grid.addEventListener('transitionend',()=>{ grid.style.maxHeight=''; },{once:true});
+  }
+  _saveGroupStates();
+}
+function pickGroup(name){
+  const inp=document.getElementById('c-group');
+  if(inp){
+    inp.value= inp.value===name ? '' : name;
+    document.querySelectorAll('.group-quick-btn').forEach(b=>b.classList.toggle('on',b.textContent.trim()===inp.value));
+  }
+}
 document.querySelectorAll('.stag[data-type]').forEach(el=>{
   el.addEventListener('click',()=>{
     const t=el.getAttribute('data-type');
@@ -2318,8 +3135,16 @@ document.querySelectorAll('.stag[data-tag]').forEach(el=>{
 });
 function filterCards(){
   const q=srch.value.toLowerCase();
+  const isTrash=filt==='trash';
+
+  // Show/hide trash vs project sections
+  document.querySelectorAll('[data-proj-section]').forEach(s=>s.style.display=isTrash?'none':'');
+  const trashSec=document.getElementById('sec-trash');
+  if(trashSec) trashSec.style.display=isTrash?'':'none';
+  if(isTrash){document.getElementById('page-sub').textContent='Trash';return;}
+
   let n=0;
-  document.querySelectorAll('#main-grid .card, #grid-pinned .card').forEach(c=>{
+  document.querySelectorAll('#main-grid .card, #grid-pinned .card, .group-grid .card').forEach(c=>{
     const name=c.dataset.name?.toLowerCase()||'';
     const type=c.dataset.type?.toLowerCase()||'';
     const tags=JSON.parse(c.dataset.tags||'[]');
@@ -2328,6 +3153,7 @@ function filterCards(){
     const isRecent=c.dataset.recent==='1';
     const hasNote=c.dataset.note==='1';
     const isPinned=c.classList.contains('pinned');
+    const group=(c.dataset.group||'').toLowerCase();
     let show=!q||(name.includes(q)||desc.includes(q)||tags.some(t=>t.includes(q)));
     if(fType&&type!==fType)show=false;
     if(fTag&&!tags.includes(fTag))show=false;
@@ -2335,9 +3161,27 @@ function filterCards(){
     if(filt==='recent'&&!isRecent)show=false;
     if(filt==='notes'&&!hasNote)show=false;
     if(filt.startsWith('st-')&&st!==filt.slice(3))show=false;
+    if(filt.startsWith('group-')&&group!==filt.slice(6))show=false;
     c.style.display=show?'':'none';
     if(show)n++;
   });
+
+  // Ocultar secciones sin cards visibles
+  document.querySelectorAll('.group-section').forEach(sec=>{
+    const anyVisible=[...sec.querySelectorAll('.card')].some(c=>c.style.display!=='none');
+    sec.style.display=anyVisible?'':'none';
+  });
+  // Ocultar "Sin grupo" si no tiene cards visibles
+  const secAll=document.getElementById('sec-all');
+  if(secAll){
+    const anyVisible=[...secAll.querySelectorAll('.card')].some(c=>c.style.display!=='none');
+    secAll.style.display=anyVisible?'':'none';
+  }
+
+  // Mostrar empty state si no hay resultados
+  const noRes=document.getElementById('no-results');
+  if(noRes) noRes.style.display=(n===0&&(q||filt!=='all'||fType||fTag))?'':'none';
+
   document.getElementById('page-sub').textContent=`${n} of <?=$total?> projects`;
 }
 
@@ -2356,6 +3200,7 @@ document.querySelectorAll('.sort-item').forEach(el=>{
 });
 function sortCards(by){
   const g=document.getElementById('main-grid');
+  if(!g)return;
   const cs=[...g.querySelectorAll('.card')];
   cs.sort((a,b)=>{
     if(by==='az')return a.dataset.name.localeCompare(b.dataset.name);
@@ -2368,54 +3213,110 @@ function sortCards(by){
     return 0;
   });
   cs.forEach(c=>g.appendChild(c));
-  localStorage.setItem('ch_order',JSON.stringify(cs.map(c=>c.dataset.name)));
+  Prefs.set('sort_mode',by);
+  Prefs.set('order',cs.map(c=>c.dataset.name));
 }
-// Restore saved order
+// Restore saved sort mode + order
 (()=>{
-  const saved=JSON.parse(localStorage.getItem('ch_order')||'[]');
-  if(!saved.length)return;
-  const g=document.getElementById('main-grid'),cs=[...g.querySelectorAll('.card')];
-  saved.forEach(n=>{const c=cs.find(x=>x.dataset.name===n);if(c)g.appendChild(c);});
+  const savedMode=Prefs.get('sort_mode',null);
+  const savedOrder=Prefs.get('order',[]);
+  if(savedMode){
+    document.querySelectorAll('.sort-item').forEach(x=>x.classList.toggle('on',x.dataset.s===savedMode));
+    sortCards(savedMode);
+  } else if(savedOrder.length){
+    const g=document.getElementById('main-grid'),cs=[...g.querySelectorAll('.card')];
+    savedOrder.forEach(n=>{const c=cs.find(x=>x.dataset.name===n);if(c)g.appendChild(c);});
+  }
 })();
 
 /* ═══════════════════════════════════════════════════════
    VIEW TOGGLE
 ═══════════════════════════════════════════════════════ */
-const MG=document.getElementById('main-grid');
 function setView(v){
-  MG.className='grid'+(v==='list'?' list':v==='compact'?' compact':'');
+  document.querySelectorAll('.grid').forEach(g=>{
+    g.classList.remove('list','compact');
+    if(v==='list') g.classList.add('list');
+    else if(v==='compact') g.classList.add('compact');
+  });
   document.getElementById('v-grid').classList.toggle('on',v==='grid'||!v);
   document.getElementById('v-list').classList.toggle('on',v==='list');
   document.getElementById('v-compact').classList.toggle('on',v==='compact');
-  localStorage.setItem('ch_view',v);
+  Prefs.set('view',v);
 }
 document.getElementById('v-grid').addEventListener('click',()=>setView('grid'));
 document.getElementById('v-list').addEventListener('click',()=>setView('list'));
 document.getElementById('v-compact').addEventListener('click',()=>setView('compact'));
-const sv=localStorage.getItem('ch_view')||'grid';
-setView(sv);
+setView(Prefs.get('view','grid'));
 
 /* ═══════════════════════════════════════════════════════
-   DRAG & DROP
+   DRAG & DROP (all grids, cross-group support)
 ═══════════════════════════════════════════════════════ */
 let dragSrc=null;
-document.querySelectorAll('#main-grid .card').forEach(c=>{
+function _initDraggable(c){
   c.setAttribute('draggable','true');
   c.addEventListener('dragstart',e=>{dragSrc=c;c.classList.add('dragging');e.dataTransfer.effectAllowed='move';});
-  c.addEventListener('dragend',()=>{c.classList.remove('dragging');document.querySelectorAll('.card').forEach(x=>x.classList.remove('dragover'));});
+  c.addEventListener('dragend',()=>{c.classList.remove('dragging');document.querySelectorAll('.card,.group-grid,#main-grid').forEach(x=>x.classList.remove('dragover','drag-target'));});
   c.addEventListener('dragover',e=>{e.preventDefault();if(c!==dragSrc)c.classList.add('dragover');});
   c.addEventListener('dragleave',()=>c.classList.remove('dragover'));
   c.addEventListener('drop',e=>{
-    e.stopPropagation();c.classList.remove('dragover');
-    if(dragSrc&&dragSrc!==c){
-      const g=document.getElementById('main-grid'),all=[...g.querySelectorAll('.card')];
-      if(all.indexOf(dragSrc)<all.indexOf(c))g.insertBefore(dragSrc,c.nextSibling);
-      else g.insertBefore(dragSrc,c);
-      localStorage.setItem('ch_order',JSON.stringify([...g.querySelectorAll('.card')].map(x=>x.dataset.name)));
+    e.stopPropagation();e.preventDefault();c.classList.remove('dragover');
+    if(!dragSrc||dragSrc===c)return;
+    const srcGrid=dragSrc.closest('.grid');
+    const dstGrid=c.closest('.grid');
+    if(srcGrid===dstGrid){
+      // same grid — reorder
+      const all=[...srcGrid.querySelectorAll('.card')];
+      if(all.indexOf(dragSrc)<all.indexOf(c))srcGrid.insertBefore(dragSrc,c.nextSibling);
+      else srcGrid.insertBefore(dragSrc,c);
+      if(srcGrid.id==='main-grid')Prefs.set('order',[...srcGrid.querySelectorAll('.card')].map(x=>x.dataset.name));
       toast('Order saved','info');
+    } else {
+      // cross-grid — move card to new group
+      _moveDragToGrid(dragSrc,dstGrid,c);
     }
   });
-});
+}
+// Drop onto the grid background (empty area)
+function _initGridDropZone(grid){
+  grid.addEventListener('dragover',e=>{e.preventDefault();grid.classList.add('drag-target');});
+  grid.addEventListener('dragleave',e=>{if(!grid.contains(e.relatedTarget))grid.classList.remove('drag-target');});
+  grid.addEventListener('drop',e=>{
+    grid.classList.remove('drag-target');
+    if(!dragSrc)return;
+    if(e.target===grid||e.target.classList.contains('grid')){
+      e.stopPropagation();e.preventDefault();
+      const srcGrid=dragSrc.closest('.grid');
+      if(srcGrid===grid)return;
+      _moveDragToGrid(dragSrc,grid,null);
+    }
+  });
+}
+async function _moveDragToGrid(card,dstGrid,beforeCard){
+  const dir=card.dataset.name;
+  // determine new group from grid
+  const sec=dstGrid.closest('.group-section');
+  const newGroup=sec ? sec.dataset.groupName : '';
+  // move DOM
+  if(beforeCard)dstGrid.insertBefore(card,beforeCard);
+  else dstGrid.appendChild(card);
+  // update data-group attribute
+  card.dataset.group=newGroup;
+  // update badge text
+  const badge=card.querySelector('.card-group-badge');
+  if(badge){
+    if(newGroup){badge.innerHTML=`<i class="fas fa-layer-group"></i>${newGroup}`;badge.style.display='';}
+    else badge.style.display='none';
+  }
+  // update PROJECTS array
+  const p=PROJECTS.find(x=>x.name===dir);
+  if(p)p.group=newGroup;
+  // persist
+  await api('cfg',{d:dir,group:newGroup});
+  updateSidebarStats();
+  toast(`"${dir}" → ${newGroup||'Sin grupo'}`,'ok');
+}
+document.querySelectorAll('.card').forEach(_initDraggable);
+document.querySelectorAll('.grid').forEach(_initGridDropZone);
 
 /* ═══════════════════════════════════════════════════════
    BULK SELECT
@@ -2442,6 +3343,19 @@ document.querySelectorAll('.card').forEach(c=>{
     document.getElementById('bulk-cnt').textContent=sel.size;
   });
 });
+async function doBulkGroup(){
+  if(!sel.size){toast('Nothing selected','info');return;}
+  const opts=['',...ALL_GROUPS];
+  const names=opts.map((g,i)=>`${i}. ${g||'Sin grupo'}`).join('\n');
+  const pick=prompt(`Mover ${sel.size} proyecto(s) a grupo:\n${names}\n\nEscribe el número:`);
+  if(pick===null)return;
+  const idx=parseInt(pick);
+  if(isNaN(idx)||idx<0||idx>=opts.length){toast('Opción inválida','err');return;}
+  const group=opts[idx];
+  for(const dir of sel) await api('cfg',{d:dir,group});
+  toast(`${sel.size} proyectos → ${group||'Sin grupo'}`,'ok');
+  setTimeout(()=>location.reload(),700);
+}
 async function doBulk(action){
   if(!sel.size){toast('Nothing selected','info');return;}
   if(action==='delete'&&!confirm(`Move ${sel.size} project(s) to trash?`))return;
@@ -2497,6 +3411,37 @@ document.getElementById('ctx-curl').onclick=()=>{
   navigator.clipboard.writeText(u).then(()=>toast('URL copied!'));
 };
 document.getElementById('ctx-del').onclick=()=>delProj(ctxDir);
+
+// Populate group submenu
+const ALL_GROUPS = <?=json_encode($allGroupNames,JSON_UNESCAPED_UNICODE)?>;
+document.querySelectorAll('.card').forEach(c=>{
+  c.addEventListener('contextmenu',()=>{
+    const sub=document.getElementById('ctx-group-sub');
+    const curGroup=(c.dataset.group||'').toLowerCase();
+    const groups=[...ALL_GROUPS];
+    let html=`<div class="ctx-sub-item" onclick="ctxMoveGroup('${c.dataset.name}','')"><i class="fas fa-minus-circle"></i>Sin grupo</div>`;
+    groups.forEach(g=>{
+      const active=curGroup===g.toLowerCase();
+      html+=`<div class="ctx-sub-item${active?' on':''}" onclick="ctxMoveGroup('${c.dataset.name.replace(/'/g,"\\'")}','${g.replace(/'/g,"\\'")}')"><i class="fas fa-${active?'check':'layer-group'}"></i>${g}</div>`;
+    });
+    sub.innerHTML=html;
+  });
+});
+async function ctxMoveGroup(dir,group){
+  ctxEl.style.display='none';
+  const p=PROJECTS.find(x=>x.name===dir);if(!p)return;
+  const r=await api('cfg',{d:dir,group});
+  if(r.ok){
+    p.group=group;
+    document.querySelectorAll(`.card[data-name="${CSS.escape(dir)}"]`).forEach(c=>{
+      c.dataset.group=group.toLowerCase();
+      const badge=c.querySelector('.card-group-badge');
+      if(badge){badge.innerHTML=group?`<i class="fas fa-layer-group"></i>${group}`:'';badge.style.display=group?'':'none';}
+    });
+    toast(`Moved to: ${group||'Sin grupo'}`,'ok');
+    updateSidebarStats();
+  }
+}
 
 /* ═══════════════════════════════════════════════════════
    SPOTLIGHT
@@ -2596,6 +3541,26 @@ function doExport(fmt){
 }
 
 /* ═══════════════════════════════════════════════════════
+   AUTO-DETECT NEW FOLDERS (polls ?a=scan every 30s)
+═══════════════════════════════════════════════════════ */
+(()=>{
+  let _known=new Set(PROJECTS.map(p=>p.name));
+  async function _scan(){
+    try{
+      const r=await fetch('?a=scan');
+      const d=await r.json();
+      if(!d.ok)return;
+      const newDirs=d.dirs.filter(n=>!_known.has(n));
+      if(newDirs.length){
+        newDirs.forEach(n=>_known.add(n));
+        toast(`${newDirs.length} nueva(s) carpeta(s) detectada(s): ${newDirs.slice(0,3).join(', ')}. Recarga para verla(s).`,'info',6000);
+      }
+    }catch(e){}
+  }
+  setInterval(_scan,30000);
+})();
+
+/* ═══════════════════════════════════════════════════════
    KEYBOARD SHORTCUTS
 ═══════════════════════════════════════════════════════ */
 document.addEventListener('keydown',e=>{
@@ -2640,10 +3605,28 @@ document.querySelectorAll('.card').forEach(c=>{
 /* ═══════════════════════════════════════════════════════
    DASHBOARD SETTINGS
 ═══════════════════════════════════════════════════════ */
+// DS → alias de Prefs para compatibilidad con todo el código existente
 const DS={
-  get:(k,d)=>{try{const v=localStorage.getItem('ch_ds_'+k);return v===null?d:JSON.parse(v);}catch{return d;}},
-  set:(k,v)=>localStorage.setItem('ch_ds_'+k,JSON.stringify(v))
+  get:(k,d)=>Prefs.get('ds_'+k,d),
+  set:(k,v)=>Prefs.set('ds_'+k,v)
 };
+
+function updateSidebarStats(){
+  const now=Date.now()/1000;
+  const total=PROJECTS.length;
+  const pinned=PROJECTS.filter(p=>p.pin).length;
+  const recent=PROJECTS.filter(p=>(now-p.mtime)<604800).length;
+  const todos=PROJECTS.reduce((s,p)=>s+(p.todos||[]).filter(t=>!t.done).length,0);
+  const tEl=document.getElementById('stat-total');if(tEl)tEl.textContent=total;
+  const pEl=document.getElementById('stat-pinned');if(pEl)pEl.textContent=pinned;
+  const rEl=document.getElementById('stat-recent');if(rEl)rEl.textContent=recent;
+  const dEl=document.getElementById('stat-todos');
+  if(dEl){dEl.textContent=todos;dEl.style.color=todos>0?'var(--warm2)':'';}
+  // update nav counts
+  const allItem=document.querySelector('.nav-item[data-f="all"]');if(allItem){const cnt=allItem.querySelector('.cnt');if(cnt)cnt.textContent=total;}
+  const pinItem=document.querySelector('.nav-item[data-f="pin"]');if(pinItem){const cnt=pinItem.querySelector('.cnt');if(cnt)cnt.textContent=pinned;}
+  document.getElementById('page-sub').textContent=`${total} projects · localhost`;
+}
 
 function switchTab(el,tab){
   document.querySelectorAll('.stab').forEach(t=>t.classList.remove('on'));
@@ -2654,7 +3637,7 @@ function switchTab(el,tab){
 
 function applyTheme(t){
   document.documentElement.setAttribute('data-theme',t);
-  localStorage.setItem('ch_theme',t);
+  Prefs.set('theme',t);
   document.querySelectorAll('.theme-dot').forEach(d=>d.classList.toggle('on',d.dataset.t===t));
   document.querySelectorAll('.tpv').forEach(d=>d.classList.toggle('sel',d.dataset.t===t));
   const lbl=document.getElementById('theme-name-lbl');if(lbl)lbl.textContent=t;
@@ -2737,9 +3720,23 @@ function applyGlow(on){
   s.textContent=on?'':'.card::after{display:none!important}';DS.set('glow',on);
 }
 function applySidebarGlass(on){document.documentElement.setAttribute('data-sidebar-glass',on?'on':'off');DS.set('sidebarGlass',on);}
+function applyCardGroup(on){document.documentElement.setAttribute('data-card-group',on?'on':'off');DS.set('cardGroup',on);}
+function applyCardTodos(on){document.documentElement.setAttribute('data-card-todos',on?'on':'off');DS.set('cardTodos',on);}
+function applyCardOpens(on){document.documentElement.setAttribute('data-card-opens',on?'on':'off');DS.set('cardOpens',on);}
+function applyCardUrl(on){document.documentElement.setAttribute('data-card-url',on?'on':'off');DS.set('cardUrl',on);}
+function applyCardDesc(on){
+  let s=document.getElementById('carddesc-override');
+  if(!s){s=document.createElement('style');s.id='carddesc-override';document.head.appendChild(s);}
+  s.textContent=on?'':'.c-desc{display:none!important}';DS.set('cardDesc',on);
+}
+function applyCardTags(on){
+  let s=document.getElementById('cardtags-override');
+  if(!s){s=document.createElement('style');s.id='cardtags-override';document.head.appendChild(s);}
+  s.textContent=on?'':'.c-tags{display:none!important}';DS.set('cardTags',on);
+}
 function resetDashSettings(){
   if(!confirm('Reset all settings?'))return;
-  ['accent','font','fsize','rounded','density','csize','compact','defview','defsort','sidebarW','sidebarGlass','statsShow','anim','tilt','particles','grain','glow'].forEach(k=>localStorage.removeItem('ch_ds_'+k));
+  Prefs.reset(['ds_accent','ds_font','ds_fsize','ds_rounded','ds_density','ds_csize','ds_compact','ds_defview','ds_defsort','ds_sidebarW','ds_sidebarGlass','ds_statsShow','ds_anim','ds_tilt','ds_particles','ds_grain','ds_glow','ds_cardGroup','ds_cardTodos','ds_cardOpens','ds_cardUrl','ds_cardDesc','ds_cardTags','theme','view','order','sort_mode','groups_collapsed']);
   toast('Reset to defaults','info');
   setTimeout(()=>location.reload(),700);
 }
@@ -2764,13 +3761,20 @@ function resetDashSettings(){
   if(!DS.get('glow',true)){const s=document.createElement('style');s.id='glow-override';s.textContent='.card::after{display:none!important}';document.head.appendChild(s);}
   if(!DS.get('statsShow',true)){const sg=document.querySelector('.stats-grid');if(sg)sg.parentElement.style.display='none';}
   const ds=DS.get('defsort',null);if(ds)setTimeout(()=>sortCards(ds),80);
+  // card elements
+  if(!DS.get('cardGroup',true))document.documentElement.setAttribute('data-card-group','off');
+  if(!DS.get('cardTodos',true))document.documentElement.setAttribute('data-card-todos','off');
+  if(!DS.get('cardOpens',true))document.documentElement.setAttribute('data-card-opens','off');
+  if(!DS.get('cardUrl',true))document.documentElement.setAttribute('data-card-url','off');
+  if(!DS.get('cardDesc',true)){const s=document.createElement('style');s.id='carddesc-override';s.textContent='.c-desc{display:none!important}';document.head.appendChild(s);}
+  if(!DS.get('cardTags',true)){const s=document.createElement('style');s.id='cardtags-override';s.textContent='.c-tags{display:none!important}';document.head.appendChild(s);}
 })();
 
 /* Sync dashboard modal state on open */
 const _origOM=window.openModal;
 window.openModal=function(id){
   _origOM(id);if(id!=='m-dash')return;
-  const ct=localStorage.getItem('ch_theme')||'dark';
+  const ct=Prefs.get('theme','dark');
   document.querySelectorAll('.tpv').forEach(d=>d.classList.toggle('sel',d.dataset.t===ct));
   const acc=DS.get('accent',null);
   if(acc)document.querySelectorAll('.acc-sw').forEach(s=>s.classList.toggle('sel',s.dataset.col===acc));
@@ -2804,6 +3808,14 @@ window.openModal=function(id){
   tog('grain-tog','grain',true);
   tog('sidebar-glass','sidebarGlass',false);
   const sd=document.getElementById('sort-pick-dash');if(sd)sd.value=DS.get('defsort','az');
+  // cards tab
+  const togC=(id,k,d)=>{const el=document.getElementById(id);if(el)el.checked=DS.get(k,d);};
+  togC('card-group-tog','cardGroup',true);
+  togC('card-todos-tog','cardTodos',true);
+  togC('card-opens-tog','cardOpens',true);
+  togC('card-url-tog','cardUrl',true);
+  togC('card-desc-tog','cardDesc',true);
+  togC('card-tags-tog','cardTags',true);
 };
 </script>
 </body>
